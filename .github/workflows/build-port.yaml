@@ -48,13 +48,13 @@ jobs:
         run: |
           set -e
           echo "Downloading mod from provided URL..."
-          pip install --quiet gdown
+          pip install --quiet "gdown>=5.2,<7"
 
           URL="${{ inputs.mod_url }}"
           mkdir -p mods_upload
 
           if [[ "$URL" == *"drive.google.com"* ]]; then
-            gdown --fuzzy "$URL" -O mod-payload.zip
+            gdown "$URL" -O mod-payload.zip
           elif [[ "$URL" == *"dropbox.com"* ]]; then
             wget -q -O mod-payload.zip "${URL%%\?*}?dl=1"
           else
