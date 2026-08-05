@@ -1,0 +1,193 @@
+name: Universal Psych Engine HTML5 Porter (Single-File)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mod_url:
+        description: 'Direct download URL to the mod .zip (Google Drive, Dropbox, MediaFire, GitHub, Discord CDN, etc.)'
+        required: true
+        type: string
+      psych_repo:
+        description: 'Psych Engine source repo (owner/name) — leave default unless using a fork'
+        required: false
+        type: string
+        default: 'ShadowMario/FNF-PsychEngine'
+      psych_ref:
+        description: 'Branch/tag/commit of the engine to build'
+        required: false
+        type: string
+        default: 'main'
+      output_filename:
+        description: 'Name of the final standalone HTML file (placed at repo root)'
+        required: false
+        type: string
+        default: 'index.html'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # ------------------------------------------------------------------
+      # 1. Get the engine + the mod
+      # ------------------------------------------------------------------
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+        with:
+          path: 'repo'
+
+      - name: Checkout Psych Engine source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.psych_repo }}
+          ref: ${{ inputs.psych_ref }}
+          path: 'engine-source'
+
+      - name: Download mod payload
+        run: |
+          set -e
+          echo "Downloading mod from provided URL..."
+          pip install --quiet gdown
+
+          URL="${{ inputs.mod_url }}"
+          mkdir -p mods_upload
+
+          if [[ "$URL" == *"drive.google.com"* ]]; then
+            gdown --fuzzy "$URL" -O mod-payload.zip
+          elif [[ "$URL" == *"dropbox.com"* ]]; then
+            wget -q -O mod-payload.zip "${URL%%\?*}?dl=1"
+          else
+            wget -q --content-disposition -O mod-payload.zip "$URL"
+          fi
+
+          if [ ! -s mod-payload.zip ]; then
+            echo "::error::Download failed or produced an empty file. Check that the URL is a direct download link and is publicly accessible."
+            exit 1
+          fi
+
+          FTYPE=$(file -b mod-payload.zip)
+          echo "Downloaded file type: $FTYPE"
+          if [[ "$FTYPE" != *"Zip archive"* ]]; then
+            echo "::error::Downloaded file is not a zip archive. Got: $FTYPE. The URL likely points to an HTML page (e.g. a Drive 'confirm download' page) instead of the raw file."
+            exit 1
+          fi
+
+          echo "Extracting mod payload..."
+          unzip -q mod-payload.zip -d mods_upload/
+          rm mod-payload.zip
+
+          # Some mod zips wrap everything in one extra top-level folder
+          # (e.g. "MyMod v1/songs/..."). Flatten that one level if present.
+          ENTRIES=$(find mods_upload -mindepth 1 -maxdepth 1 | wc -l)
+          if [ "$ENTRIES" -eq 1 ] && [ -d "$(find mods_upload -mindepth 1 -maxdepth 1)" ]; then
+            INNER=$(find mods_upload -mindepth 1 -maxdepth 1)
+            echo "Flattening single wrapper folder: $INNER"
+            mv "$INNER"/* mods_upload/ 2>/dev/null || true
+            mv "$INNER"/.[!.]* mods_upload/ 2>/dev/null || true
+            rmdir "$INNER" || true
+          fi
+
+          echo "Mod contents (top level):"
+          ls -la mods_upload/
+
+      # ------------------------------------------------------------------
+      # 2. Inject mod into engine (any Psych mod layout: assets/ and/or mods/)
+      # ------------------------------------------------------------------
+      - name: Inject mod into engine
+        run: |
+          set -e
+          cd engine-source
+          mkdir -p mods assets
+
+          # Psych mods can ship files meant for assets/ (songs, images, data,
+          # etc. that the engine reads directly) — copy broadly and let the
+          # engine's existing folder structure absorb it. -n = don't clobber
+          # engine core files with mod folders that happen to share a name.
+          cp -rn ../mods_upload/* assets/ 2>/dev/null || true
+          cp -rn ../mods_upload/* mods/   2>/dev/null || true
+
+          echo "Injected. assets/ and mods/ top level now:"
+          ls assets/ | head -30
+          echo "---"
+          ls mods/ | head -30
+
+      # ------------------------------------------------------------------
+      # 3. Toolchain
+      # ------------------------------------------------------------------
+      - name: Setup Haxe
+        uses: krdlab/setup-haxe@master
+        with:
+          haxe-version: 4.2.5
+
+      - name: Install Haxelibs and dependencies
+        run: |
+          set -e
+          cd engine-source
+          haxelib setup ~/haxelib
+          haxelib install hmm --quiet
+          haxelib run hmm install --quiet || true
+          haxelib install lime      --quiet || true
+          haxelib install openfl    --quiet || true
+          haxelib install flixel    --quiet || true
+          haxelib install flixel-addons --quiet || true
+          haxelib install flixel-ui     --quiet || true
+          haxelib run lime setup html5 || true
+
+      # ------------------------------------------------------------------
+      # 4. Strip/stub native (non-HTML5-safe) APIs so any engine version/fork
+      #    compiles clean for the web target, regardless of what native
+      #    features a given mod's custom scripts/Lua/HScript touch.
+      # ------------------------------------------------------------------
+      - name: Patch HTML5-incompatible code
+        run: |
+          set -e
+          python3 "${GITHUB_WORKSPACE}/repo/.github/scripts/patch_engine.py" --engine-dir engine-source
+
+      # ------------------------------------------------------------------
+      # 5. Compile
+      # ------------------------------------------------------------------
+      - name: Compile HTML5 build
+        run: |
+          set -e
+          cd engine-source
+          haxelib run lime build html5 -release -D DISCORD_DISABLE -D NO_PRELOAD_ALL
+
+      # ------------------------------------------------------------------
+      # 6. Inline everything into ONE standalone .html file
+      # ------------------------------------------------------------------
+      - name: Bundle into single-file HTML
+        id: bundle
+        run: |
+          set -e
+          cd engine-source/export/release/html5/bin
+          python3 "${GITHUB_WORKSPACE}/repo/.github/scripts/bundle_single_file.py" \
+            --build-dir "." \
+            --output "${GITHUB_WORKSPACE}/${{ inputs.output_filename }}" \
+            --max-bytes 99000000
+
+      # ------------------------------------------------------------------
+      # 7. Commit the single HTML file to the repo root
+      # ------------------------------------------------------------------
+      - name: Commit standalone HTML to repo root
+        run: |
+          set -e
+          cd repo
+          cp "${GITHUB_WORKSPACE}/${{ inputs.output_filename }}" "./${{ inputs.output_filename }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${{ inputs.output_filename }}"
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Automated Psych Engine web port: ${{ inputs.output_filename }}"
+            git push
+          fi
+
+      - name: Upload build artifact (backup / debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: standalone-html
+          path: ${{ inputs.output_filename }}
+          if-no-files-found: ignore
