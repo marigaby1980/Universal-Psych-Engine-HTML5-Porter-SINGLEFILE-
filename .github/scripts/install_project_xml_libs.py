@@ -12,12 +12,39 @@ does NOT satisfy a `<haxelib name="flixel" version="5.6.1"/>` pin, and lime
 fails immediately with "Could not find haxelib X version Y" the moment it
 tries to resolve the classpath, before any real compilation starts.
 
-Conditional tags (if="LUA_ALLOWED", if="VIDEOS_ALLOWED", if="debug", etc.)
-are intentionally NOT evaluated — we install every declared haxelib
-regardless of its condition. This is deliberately conservative: skipping a
-lib because we guessed its condition was false is a much worse failure mode
-(silent missing dependency at compile time) than installing one extra lib
-that ends up unused for this build target.
+CONDITION HANDLING
+-------------------
+<haxelib> tags can be gated by if="..."/unless="..." attributes, and can
+also sit inside <section if="...">...</section> blocks (which nest). We
+evaluate these against a small, fixed set of defines representing an
+HTML5 *mod* build (as opposed to an official/native build), because:
+
+  - Some declared libs (e.g. Psych Engine's funkin.vis, grig.audio, gated
+    behind BASE_GAME_FILES/officialBuild) are git-only, NOT published on
+    the public haxelib registry at all, and only exist to let the engine's
+    *official* maintainer reproduce base-game assets. A generic
+    `haxelib install <name>` for these fails outright with
+    "No such Project", not a version problem — installing them is never
+    correct for a third-party mod build regardless of version pinning.
+  - Evaluating conditions lets us skip libraries that were never meant to
+    be part of this build, avoiding failures on dependencies that aren't
+    actually needed.
+
+We deliberately keep this evaluation conservative and narrow: only
+conditions we can resolve with confidence for "HTML5 mod build" are
+evaluated (officialBuild, BASE_GAME_FILES, desktop, mobile, switch, debug,
+html5, web). Any condition token we don't recognize is treated as
+UNKNOWN, and unknown conditions default to "include the tag" — matching
+the same reasoning as before: a missed library that's actually needed is a
+worse failure than one extra install attempt.
+
+Regardless of the above, a failed install for a given library is no longer
+a hard failure of this script. Some declared libraries are legitimately
+git-only or otherwise not installable via plain `haxelib install`, and the
+separate verify_haxelibs.py step is what actually determines whether a
+still-missing, version-pinned dependency will break the compile. This
+script's job is to get as much installed as possible and report clearly
+what it couldn't.
 """
 
 import re
@@ -25,21 +52,111 @@ import sys
 import subprocess
 
 
+# Defines representing "building an HTML5 web port of a Psych Engine mod".
+# True = condition is active. Anything not listed here is UNKNOWN (see
+# _condition_holds below) and defaults to not excluding the tag.
+KNOWN_DEFINES = {
+    "html5": True,
+    "web": True,
+    "desktop": False,
+    "mobile": False,
+    "switch": False,
+    "windows": False,
+    "mac": False,
+    "linux": False,
+    "android": False,
+    "ios": False,
+    "debug": False,
+    "release": True,
+    "officialBuild": False,
+    "BASE_GAME_FILES": False,
+    "32bits": False,
+    "MODS_ALLOWED": True,
+}
+
+
+def _condition_holds(expr, default_if_unknown=True):
+    """
+    Evaluates a Lime-style condition expression: a whitespace-separated
+    list of tokens is treated as AND'd together (Lime's own semantics for
+    a single if="a b" attribute). Any token not present in KNOWN_DEFINES
+    is treated as satisfying `default_if_unknown`, so a single unknown
+    token doesn't necessarily flip a whole multi-token expression to
+    excluded — it only fails to positively confirm it.
+    """
+    if expr is None:
+        return True
+    tokens = expr.split()
+    if not tokens:
+        return True
+    for tok in tokens:
+        if tok in KNOWN_DEFINES:
+            if not KNOWN_DEFINES[tok]:
+                return False
+        else:
+            if not default_if_unknown:
+                return False
+    return True
+
+
+def _tag_attr(tag, attr):
+    m = re.search(rf'{attr}\s*=\s*"([^"]*)"', tag)
+    return m.group(1) if m else None
+
+
+def _tag_included(tag):
+    """Evaluate a tag's own if=/unless= attributes."""
+    if_expr = _tag_attr(tag, "if")
+    unless_expr = _tag_attr(tag, "unless")
+    if if_expr is not None and not _condition_holds(if_expr):
+        return False
+    if unless_expr is not None and _condition_holds(unless_expr):
+        return False
+    return True
+
+
 def find_haxelib_tags(xml_text):
     """
-    Returns a list of (name, version_or_None) tuples for every
-    <haxelib .../> tag in the file, in document order.
+    Returns a list of (name, version_or_None, included) tuples for every
+    <haxelib .../> tag in the file, in document order. `included` reflects
+    both the tag's own if=/unless= AND any enclosing <section if="...">
+    blocks it's nested inside (sections don't nest more than a couple
+    levels deep in practice, but we track a stack to be safe).
     """
-    tags = re.findall(r"<haxelib\b[^>]*/>", xml_text)
     results = []
-    for tag in tags:
-        name_match = re.search(r'name\s*=\s*"([^"]+)"', tag)
-        version_match = re.search(r'version\s*=\s*"([^"]+)"', tag)
-        if not name_match:
-            continue
-        name = name_match.group(1)
-        version = version_match.group(1) if version_match else None
-        results.append((name, version))
+    section_stack = []  # each entry: bool, whether that section is active
+
+    # Walk the document as a flat token stream of section-open, section-
+    # close, and haxelib tags, in order, to know current nesting state.
+    token_re = re.compile(
+        r"(?P<haxelib><haxelib\b[^>]*/>)"
+        r"|(?P<sec_open><section\b[^>]*>)"
+        r"|(?P<sec_close></section>)"
+    )
+
+    for m in token_re.finditer(xml_text):
+        if m.group("sec_open"):
+            tag = m.group("sec_open")
+            active = _tag_included(tag)
+            # A nested section is only active if all enclosing sections
+            # are also active.
+            parent_active = all(section_stack) if section_stack else True
+            section_stack.append(active and parent_active)
+        elif m.group("sec_close"):
+            if section_stack:
+                section_stack.pop()
+        elif m.group("haxelib"):
+            tag = m.group("haxelib")
+            name_match = re.search(r'name\s*=\s*"([^"]+)"', tag)
+            if not name_match:
+                continue
+            name = name_match.group(1)
+            version_match = re.search(r'version\s*=\s*"([^"]+)"', tag)
+            version = version_match.group(1) if version_match else None
+            in_active_section = all(section_stack) if section_stack else True
+            included = in_active_section and _tag_included(tag)
+            results.append((name, version, included))
+
     return results
 
 
@@ -57,19 +174,32 @@ def main():
         print("No <haxelib> tags found in Project.xml — nothing to install.")
         return
 
-    # De-duplicate while preserving first-seen version pin, in case a lib
-    # is referenced more than once (e.g. inside different <section> blocks).
+    # De-duplicate while preserving first-seen version pin. If a lib
+    # appears more than once with conflicting included-ness, treat it as
+    # included if ANY occurrence is included.
     seen = {}
-    for name, version in libs:
+    for name, version, included in libs:
         if name not in seen:
-            seen[name] = version
+            seen[name] = {"version": version, "included": included}
+        else:
+            if included:
+                seen[name]["included"] = True
+            if seen[name]["version"] is None and version:
+                seen[name]["version"] = version
 
-    print(f"Found {len(seen)} haxelib dependencies in Project.xml:")
-    for name, version in seen.items():
-        print(f"  - {name}" + (f" ({version})" if version else " (no version pinned)"))
+    to_install = {n: v for n, v in seen.items() if v["included"]}
+    skipped = {n: v for n, v in seen.items() if not v["included"]}
+
+    print(f"Found {len(seen)} haxelib dependencies in Project.xml "
+          f"({len(to_install)} apply to this build, {len(skipped)} skipped by condition):")
+    for name, info in seen.items():
+        tag = "install" if info["included"] else "SKIP (condition not met for HTML5 mod build)"
+        version_str = f" ({info['version']})" if info["version"] else " (no version pinned)"
+        print(f"  - {name}{version_str} -> {tag}")
 
     failures = []
-    for name, version in seen.items():
+    for name, info in to_install.items():
+        version = info["version"]
         cmd = ["haxelib", "install", name]
         if version:
             cmd.append(version)
@@ -80,12 +210,17 @@ def main():
             failures.append((name, version))
 
     if failures:
-        print("\n::error::Failed to install the following haxelib dependencies:")
+        print("\n::warning::The following haxelib dependencies could not be installed via `haxelib install`:")
         for name, version in failures:
             print(f"  - {name} {version or '(latest)'}")
-        sys.exit(1)
+        print(
+            "This is not necessarily fatal — some libraries are git-only or otherwise "
+            "not published on the public haxelib registry. The next step "
+            "(verify_haxelibs.py) will determine whether any version-pinned dependency "
+            "the compiler actually needs is still missing."
+        )
 
-    print("\nAll Project.xml-declared haxelibs installed successfully.")
+    print("\nDone installing Project.xml-declared haxelibs that apply to this build.")
 
 
 if __name__ == "__main__":
