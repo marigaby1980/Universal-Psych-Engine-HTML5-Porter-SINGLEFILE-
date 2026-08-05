@@ -124,15 +124,46 @@ jobs:
         run: |
           set -e
           cd engine-source
+          echo "Working directory: $(pwd)"
+          echo "Top-level contents:"
+          ls -la
+
           haxelib setup ~/haxelib
-          haxelib install hmm --quiet
-          haxelib run hmm install --quiet || true
-          haxelib install lime      --quiet || true
-          haxelib install openfl    --quiet || true
-          haxelib install flixel    --quiet || true
-          haxelib install flixel-addons --quiet || true
-          haxelib install flixel-ui     --quiet || true
-          haxelib run lime setup html5 || true
+
+          if [ -f "hmm.json" ]; then
+            echo "hmm.json found at $(pwd)/hmm.json — installing pinned dependency versions."
+            haxelib install hmm
+            haxelib run hmm install
+
+            # hmm install can report success while leaving a lib's local
+            # .haxelib entry incomplete/corrupted for the pinned version
+            # (a known issue with Psych Engine's flixel pin in particular).
+            # Verify each pinned lib actually resolves; force a clean
+            # reinstall of any that don't before moving on, so a bad
+            # install fails loudly here instead of confusingly mid-compile.
+            echo "Verifying pinned haxelib installs resolved correctly..."
+            python3 "${GITHUB_WORKSPACE}/repo/.github/scripts/list_hmm_libs.py" hmm.json > /tmp/hmm_libs.txt
+
+            while IFS= read -r lib; do
+              [ -z "$lib" ] && continue
+              if ! haxelib path "$lib" > /dev/null 2>&1; then
+                echo "::warning::$lib did not resolve after hmm install — forcing a clean reinstall."
+                haxelib run hmm reinstall -f "$lib" || haxelib run hmm install "$lib"
+              fi
+            done < /tmp/hmm_libs.txt
+
+            echo "Final resolved lib versions:"
+            haxelib list
+          else
+            echo "::warning::No hmm.json in this engine checkout ($(pwd)). Falling back to installing latest flixel/openfl/lime instead of pinned versions — this may not match what the engine source expects."
+            haxelib install lime
+            haxelib install openfl
+            haxelib install flixel
+            haxelib install flixel-addons || true
+            haxelib install flixel-ui || true
+          fi
+
+          haxelib run lime setup html5
 
       # ------------------------------------------------------------------
       # 4. Strip/stub native (non-HTML5-safe) APIs so any engine version/fork
