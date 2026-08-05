@@ -130,38 +130,36 @@ jobs:
 
           haxelib setup ~/haxelib
 
+          # Psych Engine's upstream repo does not ship an hmm.json (this is
+          # a known, longstanding gap — the repo is archived/read-only, so
+          # it never will). The authoritative source of truth for exact
+          # library versions is Project.xml itself, via <haxelib name="..."
+          # version="..."/> tags — this is also what `lime build` reads
+          # directly, so installing from the same source guarantees they
+          # match. If a fork DOES ship hmm.json, prefer it since it may
+          # pin additional git/hg dependencies Project.xml doesn't express.
           if [ -f "hmm.json" ]; then
-            echo "hmm.json found at $(pwd)/hmm.json — installing pinned dependency versions."
+            echo "hmm.json found — installing pinned dependency versions via hmm."
             haxelib install hmm
             haxelib run hmm install
-
-            # hmm install can report success while leaving a lib's local
-            # .haxelib entry incomplete/corrupted for the pinned version
-            # (a known issue with Psych Engine's flixel pin in particular).
-            # Verify each pinned lib actually resolves; force a clean
-            # reinstall of any that don't before moving on, so a bad
-            # install fails loudly here instead of confusingly mid-compile.
-            echo "Verifying pinned haxelib installs resolved correctly..."
-            python3 "${GITHUB_WORKSPACE}/repo/.github/scripts/list_hmm_libs.py" hmm.json > /tmp/hmm_libs.txt
-
-            while IFS= read -r lib; do
-              [ -z "$lib" ] && continue
-              if ! haxelib path "$lib" > /dev/null 2>&1; then
-                echo "::warning::$lib did not resolve after hmm install — forcing a clean reinstall."
-                haxelib run hmm reinstall -f "$lib" || haxelib run hmm install "$lib"
-              fi
-            done < /tmp/hmm_libs.txt
-
-            echo "Final resolved lib versions:"
-            haxelib list
-          else
-            echo "::warning::No hmm.json in this engine checkout ($(pwd)). Falling back to installing latest flixel/openfl/lime instead of pinned versions — this may not match what the engine source expects."
-            haxelib install lime
-            haxelib install openfl
-            haxelib install flixel
-            haxelib install flixel-addons || true
-            haxelib install flixel-ui || true
           fi
+
+          if [ -f "Project.xml" ]; then
+            echo "Installing exact library versions declared in Project.xml..."
+            python3 "${GITHUB_WORKSPACE}/repo/.github/scripts/install_project_xml_libs.py" Project.xml
+          else
+            echo "::error::No Project.xml found in engine checkout — cannot determine required library versions."
+            exit 1
+          fi
+
+          # Verify every version-pinned lib actually resolves before moving
+          # on, so a bad/incomplete install fails loudly here with a clear
+          # message instead of confusingly mid-compile.
+          echo "Verifying installed libraries resolve correctly..."
+          python3 "${GITHUB_WORKSPACE}/repo/.github/scripts/verify_haxelibs.py" Project.xml
+
+          echo "Final installed libraries:"
+          haxelib list
 
           haxelib run lime setup html5
 
