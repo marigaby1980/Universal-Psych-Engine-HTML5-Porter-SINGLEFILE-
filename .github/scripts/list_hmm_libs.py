@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 list_hmm_libs.py <path-to-hmm.json>
 
