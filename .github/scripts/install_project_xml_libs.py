@@ -45,11 +45,51 @@ separate verify_haxelibs.py step is what actually determines whether a
 still-missing, version-pinned dependency will break the compile. This
 script's job is to get as much installed as possible and report clearly
 what it couldn't.
+
+GIT-PINNED OVERRIDES
+--------------------
+A small number of libraries are not published on the public haxelib
+registry at all, or the registry's "latest" release is incompatible with
+the Haxe version this toolchain uses (observed: flxanimate's registry
+release 4.0.0 uses syntax the pinned Haxe 4.3.2 toolchain can't parse,
+while a specific older git commit is confirmed working). For libraries we
+have a documented, maintainer-confirmed git pin for, we install from that
+git URL/commit via `haxelib git` instead of the registry, regardless of
+what Project.xml says. This table currently covers Psych Engine's own
+documented "Libraries versions" wiki page; it's intentionally small and
+explicit rather than a general git-resolution mechanism, since guessing at
+a git source for a library we don't have confirmed info for would be worse
+than just attempting a normal registry install and letting verification
+catch it if that's wrong.
 """
 
 import re
 import sys
 import subprocess
+
+
+# name -> (git_url, ref). Installed via `haxelib git <name> <url> <ref>`
+# INSTEAD OF the registry, regardless of any version Project.xml declares
+# for that name (Project.xml's version attribute doesn't apply to git
+# installs — the ref IS the version).
+GIT_PINNED_LIBS = {
+    "flxanimate": (
+        "https://github.com/Dot-Stuff/flxanimate",
+        "768740a56b26aa0c072720e0d1236b94afe68e3e",
+    ),
+    "linc_luajit": (
+        "https://github.com/superpowers04/linc_luajit.git",
+        None,
+    ),
+    "funkin.vis": (
+        "https://github.com/FunkinCrew/funkVis",
+        "22b1ce089dd924f15cdc4632397ef3504d464e90",
+    ),
+    "grig.audio": (
+        "https://gitlab.com/haxe-grig/grig.audio.git",
+        "cbf91e2180fd2e374924fe74844086aab7891666",
+    ),
+}
 
 
 # Defines representing "building an HTML5 web port of a Psych Engine mod".
@@ -200,11 +240,21 @@ def main():
     failures = []
     for name, info in to_install.items():
         version = info["version"]
-        cmd = ["haxelib", "install", name]
-        if version:
-            cmd.append(version)
-        cmd.append("--quiet")
-        print(f"\nRunning: {' '.join(cmd)}")
+
+        if name in GIT_PINNED_LIBS:
+            git_url, ref = GIT_PINNED_LIBS[name]
+            cmd = ["haxelib", "git", name, git_url]
+            if ref:
+                cmd.append(ref)
+            print(f"\n{name} has a known git pin — installing from source instead of the registry.")
+            print(f"Running: {' '.join(cmd)}")
+        else:
+            cmd = ["haxelib", "install", name]
+            if version:
+                cmd.append(version)
+            cmd.append("--quiet")
+            print(f"\nRunning: {' '.join(cmd)}")
+
         result = subprocess.run(cmd, input="y\n", text=True)
         if result.returncode != 0:
             failures.append((name, version))
