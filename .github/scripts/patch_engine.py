@@ -90,6 +90,45 @@ class Mutex {
   public function release() {}
 }
 """,
+    "source/hxdiscord_rpc/DiscordRpc.hx": """\
+package hxdiscord_rpc;
+// Stub for hxdiscord_rpc.DiscordRpc, a native hxcpp @:native binding to
+// the desktop Discord IPC client. This library is fundamentally
+// desktop-only (it binds to a native C++ SDK that talks to the local
+// Discord app over IPC) — there is no browser equivalent, so this is a
+// permanent, structural no-op for HTML5 rather than a compatibility gap
+// that could be closed with a better stub.
+class DiscordRpc {
+  public static function start(?opts:Dynamic):Void {}
+  public static function shutdown():Void {}
+  public static function runCallbacks():Void {}
+  public static function updatePresence(?presence:Dynamic):Void {}
+  public static function clearPresence():Void {}
+  public static function respond(?userId:String, ?reply:Int):Void {}
+}
+""",
+    "source/hxdiscord_rpc/DiscordEventHandlers.hx": """\
+package hxdiscord_rpc;
+// Anonymous-structure-like stub with a static `create` factory, matching
+// the shape hxcpp @:native struct bindings expose. Using Dynamic fields
+// means any field Psych's Discord.hx (or a fork's variant of it) sets on
+// this — onReady, onDisconnected, onError, etc. — resolves without a
+// compile error, regardless of the exact field set a given engine version
+// expects.
+class DiscordEventHandlers {
+  public static function create(?opts:Dynamic):DiscordEventHandlers return new DiscordEventHandlers();
+  public function new() {}
+}
+""",
+    "source/hxdiscord_rpc/DiscordRichPresence.hx": """\
+package hxdiscord_rpc;
+// See DiscordEventHandlers above for why this uses a permissive
+// create()-factory shape rather than an exact field match.
+class DiscordRichPresence {
+  public static function create(?opts:Dynamic):DiscordRichPresence return new DiscordRichPresence();
+  public function new() {}
+}
+""",
     "source/hxdiscord_rpc/Discord.hx": """\
 package hxdiscord_rpc;
 class Discord {
