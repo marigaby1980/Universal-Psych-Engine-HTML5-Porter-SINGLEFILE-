@@ -223,6 +223,43 @@ def find_haxelib_tags(xml_text):
     return results
 
 
+def strip_version_for_git_installed_libs(project_xml_path, git_installed_names):
+    """
+    Removes the version="..." attribute from <haxelib name="X" .../> tags
+    for any X that was actually installed via `haxelib git` rather than
+    the registry. This matters because `lime build` resolves a
+    Project.xml version pin by literal string match against installed
+    haxelib versions — a git install registers under the special version
+    label "git", not the version string Project.xml declares, so leaving
+    the version="..." attribute in place causes lime to fail with
+    "Could not find haxelib X version Y" even though X is correctly
+    installed and would resolve fine as an unpinned reference.
+    """
+    if not git_installed_names:
+        return
+
+    with open(project_xml_path, "r", encoding="utf-8", errors="replace") as f:
+        xml_text = f.read()
+
+    original = xml_text
+
+    def _strip_version(match):
+        tag = match.group(0)
+        name_match = re.search(r'name\s*=\s*"([^"]+)"', tag)
+        if not name_match or name_match.group(1) not in git_installed_names:
+            return tag
+        return re.sub(r'\s+version\s*=\s*"[^"]*"', "", tag)
+
+    xml_text = re.sub(r"<haxelib\b[^>]*/>", _strip_version, xml_text)
+
+    if xml_text != original:
+        with open(project_xml_path, "w", encoding="utf-8") as f:
+            f.write(xml_text)
+        print(f"\nProject.xml: removed version= pins for git-installed libs: {', '.join(sorted(git_installed_names))}")
+    else:
+        print("\nProject.xml: no version pins needed stripping for git-installed libs.")
+
+
 def main():
     if len(sys.argv) != 2:
         print("Usage: install_project_xml_libs.py <Project.xml>", file=sys.stderr)
@@ -261,6 +298,7 @@ def main():
         print(f"  - {name}{version_str} -> {tag}")
 
     failures = []
+    git_installed_successfully = set()
     for name, info in to_install.items():
         version = info["version"]
 
@@ -278,7 +316,9 @@ def main():
                     success = True
                     break
                 print(f"  ref '{ref}' did not work, trying next candidate if any remain.")
-            if not success:
+            if success:
+                git_installed_successfully.add(name)
+            else:
                 failures.append((name, version))
             continue
 
@@ -290,6 +330,8 @@ def main():
         result = subprocess.run(cmd, input="y\n", text=True)
         if result.returncode != 0:
             failures.append((name, version))
+
+    strip_version_for_git_installed_libs(path, git_installed_successfully)
 
     if failures:
         print("\n::warning::The following haxelib dependencies could not be installed via `haxelib install`:")
