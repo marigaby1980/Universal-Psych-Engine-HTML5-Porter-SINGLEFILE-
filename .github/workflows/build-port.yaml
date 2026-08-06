@@ -22,6 +22,16 @@ on:
         required: false
         type: string
         default: 'index.html'
+      lime_version:
+        description: 'Exact lime version to pin (maintainer-confirmed working version for stock Psych Engine 1.0+)'
+        required: false
+        type: string
+        default: '8.1.2'
+      openfl_version:
+        description: 'Exact openfl version to pin (maintainer-confirmed working version for stock Psych Engine 1.0+)'
+        required: false
+        type: string
+        default: '9.3.3'
 
 jobs:
   build:
@@ -151,6 +161,24 @@ jobs:
             echo "::error::No Project.xml found in engine checkout — cannot determine required library versions."
             exit 1
           fi
+
+          # lime/openfl are NOT declared as <haxelib> tags in Project.xml
+          # (they're the build tool itself), so the step above never pins
+          # them. Left alone, haxelib's own dependency resolver can pull in
+          # whatever the LATEST lime/openfl is to satisfy some other
+          # library's requirements (observed: installing hxvlc 2.0.1
+          # transitively pulled lime 8.3.2 + openfl 9.5.2, silently
+          # overriding the maintainer-confirmed working combo of
+          # lime 8.1.2 / openfl 9.3.3 — which then broke HTML5 compilation
+          # via a class, sys.thread.FixedThreadPool, that only exists on
+          # native targets). Explicitly (re-)pin lime/openfl AFTER
+          # everything else has installed, so no other library's transitive
+          # resolution can override them afterward.
+          echo "Pinning lime/openfl to known-good versions for this engine (override via workflow inputs if needed)..."
+          haxelib install lime "${{ inputs.lime_version }}" --quiet
+          haxelib install openfl "${{ inputs.openfl_version }}" --quiet
+          haxelib set lime "${{ inputs.lime_version }}"
+          haxelib set openfl "${{ inputs.openfl_version }}"
 
           # Verify every version-pinned lib actually resolves before moving
           # on, so a bad/incomplete install fails loudly here with a clear
