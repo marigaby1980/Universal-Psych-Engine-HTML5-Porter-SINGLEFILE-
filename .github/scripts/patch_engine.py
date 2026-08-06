@@ -353,41 +353,63 @@ def replace_discord_client(engine_dir):
 # subclass, removing the "extends BitmapData" is enough to stop the macro
 # from running for these classes without needing to touch anything else
 # in the file. This does mean flixel-addons' built-in transition graphics
-# (circle/square/diamond/diagonal-gradient wipes) won't be available if a
-# mod's own code actually calls into FlxTransitionableState/TransitionFade
-# expecting them; most Psych mods don't touch this system directly, and
-# a working build without this cosmetic feature is a better outcome than
-# blocking the whole compile over it.
+# flixel-addons' TransitionFade.hx declares empty classes like
+# `class RawGraphicDiagonalGradient extends BitmapData {}` purely to
+# trigger OpenFL's @:autoBuild(AssetsMacro.embedBitmap()) compile-time
+# asset-embedding macro (the same mechanism used throughout OpenFL/Flixel
+# for auto-embedding bundled images by naming convention, always in the
+# shape `@:bitmap("path/to/image.png") class SomeRawGraphic extends
+# BitmapData {}`). On this toolchain that macro crashes with an uncaught
+# null-access exception while reading the target PNG's bytes. This isn't
+# limited to flixel-addons — the identical pattern was also observed
+# crashing on flixel core's own FlxMouse.hx (GraphicCursor extends
+# BitmapData {}), confirming this is a general AssetsMacro incompatibility
+# on this Haxe/OpenFL combination, not something specific to one library's
+# packaging. Rather than chase every individual occurrence across every
+# haxelib as each one surfaces in turn, this scans and neutralizes the
+# pattern everywhere it appears across the whole haxelib install
+# directory in one pass. Since the crash is in the *macro's*
+# asset-embedding step, not in any code that actually runs, and each
+# empty class's only purpose is to be a BitmapData subclass, removing the
+# "extends BitmapData" is enough to stop the macro from running for these
+# classes without needing to touch anything else in the file. This does
+# mean the associated bundled graphic (cursor images, transition wipes,
+# etc.) won't be available if code actually instantiates the public
+# wrapper class around it; a working build without a cosmetic built-in
+# asset is a better outcome than blocking the whole compile over it.
 TRANSITION_RAW_GRAPHIC_PATTERN = re.compile(
-    r"class\s+(RawGraphicTransTile\w+|RawGraphicDiagonalGradient)\s+extends\s+BitmapData\s*\{\}"
+    r"class\s+(\w+)\s+extends\s+BitmapData\s*\{\}"
 )
 
+# Directories under a haxelib install that are safe to skip: test suites,
+# samples, and docs sometimes contain their own throwaway BitmapData
+# subclasses that aren't part of what actually gets compiled, and
+# skipping them keeps this patch's output focused on files that matter.
+_SKIP_DIR_NAMES = {"test", "tests", "samples", "sample", "demo", "demos", "docs", "documentation"}
 
-def patch_transition_asset_macro(haxelib_dir):
+
+def patch_asset_macro_bitmapdata_classes(haxelib_dir):
     """
-    Scans every .hx file under flixel-addons (registry or git install, any
-    version) and neutralizes the BitmapData-subclassing pattern that
-    triggers OpenFL's crashing auto-embed macro. Multiple files declare
-    these marker classes (observed: TransitionFade.hx has
-    RawGraphicDiagonalGradient, FlxTransitionSprite.hx has
-    RawGraphicTransTileCircle/Square/Diamond, etc.) — scanning the whole
-    package directory rather than one specific filename means a single
-    pass catches all of them, instead of needing to chase each file down
-    individually as the same class of crash resurfaces in a new location.
+    Scans every .hx file across the whole haxelib install directory and
+    neutralizes the `class X extends BitmapData {}` pattern that triggers
+    OpenFL's crashing auto-embed macro, regardless of which library it's
+    declared in. See the module-level comment above for why this is
+    scoped this broadly rather than to one specific package.
     """
     if not haxelib_dir or not os.path.isdir(haxelib_dir):
         return
-    package_dir = os.path.join(haxelib_dir, "flixel-addons")
-    if not os.path.isdir(package_dir):
-        print("No flixel-addons install found under haxelib dir — skipping transition-asset-macro patch.")
-        return
 
-    hx_files = glob.glob(os.path.join(package_dir, "**", "*.hx"), recursive=True)
+    hx_files = glob.glob(os.path.join(haxelib_dir, "**", "*.hx"), recursive=True)
     total_patched_files = 0
     total_patched_classes = 0
     for path in hx_files:
+        parts = os.path.normpath(path).split(os.sep)
+        if any(p.lower() in _SKIP_DIR_NAMES for p in parts):
+            continue
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
+        if "extends BitmapData" not in text:
+            continue
         patched, count = TRANSITION_RAW_GRAPHIC_PATTERN.subn(
             lambda m: f"class {m.group(1)} {{}}",
             text,
@@ -396,15 +418,15 @@ def patch_transition_asset_macro(haxelib_dir):
             continue
         with open(path, "w", encoding="utf-8") as f:
             f.write(patched)
-        print(f"Patched {path}: removed 'extends BitmapData' from {count} transition graphic class(es) "
+        print(f"Patched {path}: removed 'extends BitmapData' from {count} class(es) "
               f"to prevent the AssetsMacro null-access crash.")
         total_patched_files += 1
         total_patched_classes += count
 
     if total_patched_files == 0:
-        print("No RawGraphic*/BitmapData auto-embed pattern found anywhere under flixel-addons — nothing to patch.")
+        print("No BitmapData auto-embed pattern found anywhere under the haxelib directory — nothing to patch.")
     else:
-        print(f"Transition-asset-macro patch: {total_patched_classes} class(es) across {total_patched_files} file(s).")
+        print(f"AssetsMacro BitmapData patch: {total_patched_classes} class(es) across {total_patched_files} file(s).")
 
 
 def main():
@@ -441,7 +463,7 @@ def main():
     patch_flx_sound_tray(args.engine_dir)
 
     if extra_dirs:
-        patch_transition_asset_macro(extra_dirs[0])
+        patch_asset_macro_bitmapdata_classes(extra_dirs[0])
 
     print("Engine patching complete.")
 
