@@ -129,16 +129,6 @@ class DiscordRichPresence {
   public function new() {}
 }
 """,
-    "source/hxdiscord_rpc/Discord.hx": """\
-package hxdiscord_rpc;
-class Discord {
-  public static function Initialize(a:String,b:Bool,c:Dynamic){}
-  public static function Shutdown(){}
-  public static function RunCallbacks(){}
-  public static function UpdatePresence(a:Dynamic){}
-  public static function ClearPresence(){}
-}
-""",
     "source/hxdiscord_rpc/Types.hx": """\
 package hxdiscord_rpc;
 class Types {
@@ -272,6 +262,82 @@ def patch_flx_sound_tray(engine_dir):
         print(f"Patched FlxSoundTray at {path}")
 
 
+# Psych Engine's own source/backend/Discord.hx directly references
+# hxdiscord_rpc's native-binding types (DiscordRichPresence,
+# DiscordEventHandlers, etc.) as concrete fields/instance variables, not
+# just inside conditional-compilation blocks. Stubbing those individual
+# types to match the real library's exact API shape has proven fragile —
+# hxdiscord_rpc is a hxcpp @:native extern binding, and its precise type
+# shape (typedefs vs classes, required static factories, struct layout)
+# isn't reliably discoverable without a native compiler to test against.
+# Since Discord RPC is categorically impossible in a browser regardless of
+# how well it's stubbed, the more robust fix is to replace this file
+# entirely with a minimal implementation exposing the same public API the
+# rest of the engine calls (per Main.hx/PlayState.hx usage:
+# DiscordClient.shutdown(), DiscordClient.changePresence(...),
+# DiscordClient.initialize()) as no-ops, rather than attempting to satisfy
+# the real native binding's internal type references at all.
+DISCORD_CLIENT_REPLACEMENT = """\
+package backend;
+
+// Replaced for HTML5 builds: Discord Rich Presence is a native desktop
+// IPC feature (hxdiscord_rpc binds to the local Discord client over a
+// native protocol) with no browser equivalent. This class keeps the same
+// public API the rest of the engine calls so nothing else needs to change,
+// but every method is a no-op. Uses Dynamic for the Lua callback
+// parameter rather than a Lua-specific state type, since this file also
+// passes through the same native-API rewrite pass as the rest of the
+// source tree, which strips Lua-binding imports; Dynamic avoids
+// depending on an import that would not survive that pass, and the
+// parameter is unused here regardless.
+class DiscordClient {
+  public static function initialize():Void {}
+  public static function shutdown():Void {}
+  public static function changePresence(details:String, ?state:String, ?smallImageKey:String,
+      ?hasStartTimestamp:Bool, ?endTimestamp:Float):Void {}
+  public static function resetClientID():Void {}
+
+  #if LUA_ALLOWED
+  public static function addLuaCallbacks(lua:Dynamic):Void {}
+  #end
+}
+"""
+
+
+def replace_discord_client(engine_dir):
+    """
+    Finds source/backend/Discord.hx (the conventional Psych location) and
+    any similarly-named file elsewhere in the tree, and replaces its
+    content with a minimal no-op DiscordClient implementation. Only
+    touches files that actually reference hxdiscord_rpc, so forks that
+    don't use native Discord RPC at all are left untouched.
+
+    Explicitly excludes anything already under a hxdiscord_rpc/ package
+    directory (i.e. our own generated stubs in write_stubs), since those
+    are a different, unrelated Discord.hx-named file that must NOT be
+    overwritten by this — write_stubs already gives them correct content,
+    and this function's job is only the engine's own backend/Discord.hx
+    wrapper class.
+    """
+    candidates = glob.glob(os.path.join(engine_dir, "**", "Discord.hx"), recursive=True)
+    candidates = [
+        p for p in candidates
+        if os.path.basename(os.path.dirname(p)) != "hxdiscord_rpc"
+    ]
+    replaced = 0
+    for path in candidates:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        if "hxdiscord_rpc" not in text and "discord_rpc" not in text:
+            continue
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(DISCORD_CLIENT_REPLACEMENT)
+        print(f"Replaced {path} with a no-op DiscordClient (native Discord RPC has no HTML5 equivalent).")
+        replaced += 1
+    if replaced == 0:
+        print("No Discord.hx referencing hxdiscord_rpc/discord_rpc found — nothing to replace.")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--engine-dir", required=True)
@@ -292,6 +358,7 @@ def main():
 
     write_stubs(args.engine_dir)
     strip_discord_from_project_xml(args.engine_dir)
+    replace_discord_client(args.engine_dir)
 
     extra_dirs = []
     if args.haxelib_dir:
