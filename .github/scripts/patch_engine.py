@@ -365,17 +365,27 @@ TRANSITION_RAW_GRAPHIC_PATTERN = re.compile(
 
 def patch_transition_asset_macro(haxelib_dir):
     """
-    Finds flixel-addons' TransitionFade.hx (registry or git install, any
-    version) under haxelib_dir and neutralizes the BitmapData-subclassing
-    pattern that triggers OpenFL's crashing auto-embed macro.
+    Scans every .hx file under flixel-addons (registry or git install, any
+    version) and neutralizes the BitmapData-subclassing pattern that
+    triggers OpenFL's crashing auto-embed macro. Multiple files declare
+    these marker classes (observed: TransitionFade.hx has
+    RawGraphicDiagonalGradient, FlxTransitionSprite.hx has
+    RawGraphicTransTileCircle/Square/Diamond, etc.) — scanning the whole
+    package directory rather than one specific filename means a single
+    pass catches all of them, instead of needing to chase each file down
+    individually as the same class of crash resurfaces in a new location.
     """
     if not haxelib_dir or not os.path.isdir(haxelib_dir):
         return
-    candidates = glob.glob(os.path.join(haxelib_dir, "flixel-addons", "**", "TransitionFade.hx"), recursive=True)
-    if not candidates:
-        print("No flixel-addons TransitionFade.hx found — skipping transition-asset-macro patch.")
+    package_dir = os.path.join(haxelib_dir, "flixel-addons")
+    if not os.path.isdir(package_dir):
+        print("No flixel-addons install found under haxelib dir — skipping transition-asset-macro patch.")
         return
-    for path in candidates:
+
+    hx_files = glob.glob(os.path.join(package_dir, "**", "*.hx"), recursive=True)
+    total_patched_files = 0
+    total_patched_classes = 0
+    for path in hx_files:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
         patched, count = TRANSITION_RAW_GRAPHIC_PATTERN.subn(
@@ -383,12 +393,18 @@ def patch_transition_asset_macro(haxelib_dir):
             text,
         )
         if count == 0:
-            print(f"{path}: no matching RawGraphic*/BitmapData pattern found (already patched or different structure).")
             continue
         with open(path, "w", encoding="utf-8") as f:
             f.write(patched)
         print(f"Patched {path}: removed 'extends BitmapData' from {count} transition graphic class(es) "
               f"to prevent the AssetsMacro null-access crash.")
+        total_patched_files += 1
+        total_patched_classes += count
+
+    if total_patched_files == 0:
+        print("No RawGraphic*/BitmapData auto-embed pattern found anywhere under flixel-addons — nothing to patch.")
+    else:
+        print(f"Transition-asset-macro patch: {total_patched_classes} class(es) across {total_patched_files} file(s).")
 
 
 def main():
