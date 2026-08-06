@@ -111,6 +111,22 @@ class Types {
     "source/hxdiscord_rpc/DiscordPresence.hx": (
         "package hxdiscord_rpc; typedef DiscordPresence = Dynamic;\n"
     ),
+    "source/ThreadPool.hx": """\
+// Stub for sys.thread.FixedThreadPool/IThreadPool, which the Haxe standard
+// library deliberately blocks with #error on targets without real OS
+// threads (HTML5/js included). Some haxelib dependency or engine code path
+// imports this directly without a `#if target.threaded` guard; rewriting
+// those imports to this class keeps the reference resolvable while making
+// every operation a synchronous same-thread no-op/passthrough, which is a
+// safe behavior for a single-threaded JS runtime.
+class ThreadPool {
+  public function new(threadsCount:Int = 1) {}
+  public function submit(task:Void->Void):Void { if (task != null) task(); }
+  public function shutdown():Void {}
+  public var isShutdown(get, never):Bool;
+  function get_isShutdown():Bool return true;
+}
+""",
 }
 
 REGEX_REWRITES = [
@@ -119,6 +135,17 @@ REGEX_REWRITES = [
     (r"sys\.io\.Process", "Process"),
     (r"sys\.thread\.Thread", "Thread"),
     (r"sys\.thread\.Mutex", "Mutex"),
+    (r"sys\.thread\.FixedThreadPool", "ThreadPool"),
+    (r"sys\.thread\.IThreadPool", "ThreadPool"),
+    (r"sys\.thread\.ElasticThreadPool", "ThreadPool"),
+    # Bare (unqualified) references to the same classes, e.g. after an
+    # `import sys.thread.FixedThreadPool` (already rewritten above to
+    # `import ThreadPool` by the pattern before this one) or a wildcard
+    # `import sys.thread.*`. Word-boundary anchored so this only matches
+    # the exact identifier, not other identifiers that merely contain it.
+    (r"\bFixedThreadPool\b", "ThreadPool"),
+    (r"\bIThreadPool\b", "ThreadPool"),
+    (r"\bElasticThreadPool\b", "ThreadPool"),
     (r"^\s*import cpp[^\n]*\n", ""),
     (r"cpp\.[a-zA-Z0-9_]+", "Dynamic"),
     (r"^\s*import llua[^\n]*\n", ""),
@@ -151,21 +178,40 @@ def strip_discord_from_project_xml(engine_dir):
     print(f"Project.xml: removed {len(lines) - len(kept)} discord/luajit reference line(s).")
 
 
-def rewrite_source_tree(engine_dir):
-    hx_files = glob.glob(os.path.join(engine_dir, "**", "*.hx"), recursive=True)
-    changed = 0
-    for path in hx_files:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
-        original = text
-        for pattern, repl in REGEX_REWRITES:
-            flags = re.MULTILINE if pattern.startswith("^") else 0
-            text = re.sub(pattern, repl, text, flags=flags)
-        if text != original:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(text)
-            changed += 1
-    print(f"Rewrote native-API references in {changed} of {len(hx_files)} .hx files.")
+def rewrite_source_tree(engine_dir, extra_dirs=None):
+    """
+    Rewrites native-only API references in engine_dir, and optionally in
+    additional directories (e.g. installed haxelibs under ~/haxelib) where
+    a dependency's own source may reference a native-only class like
+    sys.thread.FixedThreadPool without a proper #if target.threaded guard.
+    Haxelib-installed sources are normally never edited, but since these
+    are ephemeral CI runner installs (not the user's own environment) and
+    the alternative is an unbuildable HTML5 target, patching them in place
+    here is safe and contained to this run.
+    """
+    search_dirs = [engine_dir] + (extra_dirs or [])
+    total_changed = 0
+    total_files = 0
+    for base_dir in search_dirs:
+        if not os.path.isdir(base_dir):
+            continue
+        hx_files = glob.glob(os.path.join(base_dir, "**", "*.hx"), recursive=True)
+        changed = 0
+        for path in hx_files:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            original = text
+            for pattern, repl in REGEX_REWRITES:
+                flags = re.MULTILINE if pattern.startswith("^") else 0
+                text = re.sub(pattern, repl, text, flags=flags)
+            if text != original:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+                changed += 1
+        print(f"[{base_dir}] Rewrote native-API references in {changed} of {len(hx_files)} .hx files.")
+        total_changed += changed
+        total_files += len(hx_files)
+    print(f"Total: rewrote {total_changed} of {total_files} .hx files across all scanned directories.")
 
 
 def patch_flx_sound_tray(engine_dir):
@@ -190,11 +236,33 @@ def patch_flx_sound_tray(engine_dir):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--engine-dir", required=True)
+    parser.add_argument(
+        "--haxelib-dir",
+        default=None,
+        help="Optional path to the haxelib repository (e.g. ~/haxelib) to "
+             "also scan/rewrite for native-only API references that a "
+             "dependency's own source may use without a target guard. "
+             "Safe to point at the whole haxelib cache: these specific "
+             "classes (Thread/Mutex/FixedThreadPool/etc.) are unavailable "
+             "on HTML5 regardless, so there's no correctly-working HTML5 "
+             "code path this rewrite could break — and any occurrence "
+             "inside a proper #if cpp/#if sys guard is never reached by "
+             "an HTML5 compile anyway, so rewriting it there is inert.",
+    )
     args = parser.parse_args()
 
     write_stubs(args.engine_dir)
     strip_discord_from_project_xml(args.engine_dir)
-    rewrite_source_tree(args.engine_dir)
+
+    extra_dirs = []
+    if args.haxelib_dir:
+        expanded = os.path.expanduser(args.haxelib_dir)
+        if os.path.isdir(expanded):
+            extra_dirs.append(expanded)
+        else:
+            print(f"::warning::--haxelib-dir given ({args.haxelib_dir}) but not found on disk, skipping.")
+
+    rewrite_source_tree(args.engine_dir, extra_dirs=extra_dirs)
     patch_flx_sound_tray(args.engine_dir)
 
     print("Engine patching complete.")
