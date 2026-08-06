@@ -199,7 +199,7 @@ jobs:
       - name: Patch HTML5-incompatible code
         run: |
           set -e
-          python3 "${GITHUB_WORKSPACE}/repo/.github/scripts/patch_engine.py" --engine-dir engine-source
+          python3 "${GITHUB_WORKSPACE}/repo/.github/scripts/patch_engine.py" --engine-dir engine-source --haxelib-dir ~/haxelib
 
       # ------------------------------------------------------------------
       # 5. Compile
@@ -208,6 +208,17 @@ jobs:
         run: |
           set -e
           cd engine-source
+
+          # Diagnostic: if the build fails on a native-only class again
+          # (e.g. sys.thread.*), this prints every file across the engine
+          # source AND all installed haxelibs that references it, so the
+          # exact offending import is visible in this step's log instead
+          # of requiring another blind guess-and-rerun cycle.
+          echo "--- Pre-compile scan for sys.thread usage (diagnostic only) ---"
+          grep -rn "sys\.thread\.\|sys\.thread;" source/ ~/haxelib 2>/dev/null \
+            --include="*.hx" | grep -v "^source/Thread.hx\|^source/Mutex.hx" || echo "(no direct sys.thread references found)"
+          echo "--- End diagnostic scan ---"
+
           haxelib run lime build html5 -release -D DISCORD_DISABLE -D NO_PRELOAD_ALL
 
       # ------------------------------------------------------------------
