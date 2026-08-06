@@ -68,26 +68,49 @@ import sys
 import subprocess
 
 
-# name -> (git_url, ref). Installed via `haxelib git <name> <url> <ref>`
-# INSTEAD OF the registry, regardless of any version Project.xml declares
-# for that name (Project.xml's version attribute doesn't apply to git
-# installs — the ref IS the version).
+# name -> (git_url, ref_candidates). Installed via `haxelib git <name> <url>
+# <ref>` INSTEAD OF the registry, regardless of any version Project.xml
+# declares for that name (Project.xml's version attribute doesn't apply to
+# git installs — the ref IS the version). ref_candidates is a tuple tried
+# in order — the first one `haxelib git` accepts wins — since exact git
+# tag naming conventions ("3.2.2" vs "v3.2.2" vs a branch name) aren't
+# always confidently knowable in advance, and a wrong guess should fall
+# back rather than hard-fail the whole install.
 GIT_PINNED_LIBS = {
     "flxanimate": (
         "https://github.com/Dot-Stuff/flxanimate",
-        "768740a56b26aa0c072720e0d1236b94afe68e3e",
+        ("768740a56b26aa0c072720e0d1236b94afe68e3e",),
     ),
     "linc_luajit": (
         "https://github.com/superpowers04/linc_luajit.git",
-        None,
+        (None,),
     ),
     "funkin.vis": (
         "https://github.com/FunkinCrew/funkVis",
-        "22b1ce089dd924f15cdc4632397ef3504d464e90",
+        ("22b1ce089dd924f15cdc4632397ef3504d464e90",),
     ),
     "grig.audio": (
         "https://gitlab.com/haxe-grig/grig.audio.git",
-        "cbf91e2180fd2e374924fe74844086aab7891666",
+        ("cbf91e2180fd2e374924fe74844086aab7891666",),
+    ),
+    "flixel-addons": (
+        # The haxelib registry zip for 3.2.2 appears to be missing/have an
+        # unreadable copy of a bundled transition asset
+        # (flixel/images/transitions/diagonal_gradient.png), which
+        # flixel-addons auto-embeds at compile time via
+        # openfl.utils._internal.AssetsMacro (triggered by
+        # TransitionFade.hx's `class RawGraphicDiagonalGradient extends
+        # BitmapData {}`). The macro reads the asset's raw bytes at
+        # compile time and crashes with "Uncaught exception Null Access"
+        # when the file is missing/empty, rather than a normal "file not
+        # found" error. A `haxelib git` install of the same version always
+        # pulls the complete repository working tree (not a packaged
+        # zip), so it can't be missing a tracked binary asset the way a
+        # stale/incomplete registry package could be. Try both common tag
+        # naming conventions since it isn't confidently known which one
+        # this repo uses.
+        "https://github.com/HaxeFlixel/flixel-addons",
+        ("3.2.2", "v3.2.2"),
     ),
 }
 
@@ -242,19 +265,28 @@ def main():
         version = info["version"]
 
         if name in GIT_PINNED_LIBS:
-            git_url, ref = GIT_PINNED_LIBS[name]
-            cmd = ["haxelib", "git", name, git_url]
-            if ref:
-                cmd.append(ref)
+            git_url, ref_candidates = GIT_PINNED_LIBS[name]
             print(f"\n{name} has a known git pin — installing from source instead of the registry.")
-            print(f"Running: {' '.join(cmd)}")
-        else:
-            cmd = ["haxelib", "install", name]
-            if version:
-                cmd.append(version)
-            cmd.append("--quiet")
-            print(f"\nRunning: {' '.join(cmd)}")
+            success = False
+            for ref in ref_candidates:
+                cmd = ["haxelib", "git", name, git_url]
+                if ref:
+                    cmd.append(ref)
+                print(f"Trying: {' '.join(cmd)}")
+                result = subprocess.run(cmd, input="y\n", text=True)
+                if result.returncode == 0:
+                    success = True
+                    break
+                print(f"  ref '{ref}' did not work, trying next candidate if any remain.")
+            if not success:
+                failures.append((name, version))
+            continue
 
+        cmd = ["haxelib", "install", name]
+        if version:
+            cmd.append(version)
+        cmd.append("--quiet")
+        print(f"\nRunning: {' '.join(cmd)}")
         result = subprocess.run(cmd, input="y\n", text=True)
         if result.returncode != 0:
             failures.append((name, version))
