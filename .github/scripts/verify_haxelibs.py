@@ -24,6 +24,16 @@ import subprocess
 import sys
 
 
+# Libraries known to be installed via `haxelib git` rather than the
+# registry (see install_project_xml_libs.py's GIT_PINNED_LIBS). A git
+# install shows up in `haxelib list` as version "git", not the actual
+# pinned version string, so these are treated as satisfying any
+# Project.xml version pin as long as SOME version is installed at all —
+# the git ref itself, not this string match, is what actually pins the
+# real content for these.
+GIT_INSTALLED_LIBS = {"flxanimate", "linc_luajit", "funkin.vis", "grig.audio", "flixel-addons"}
+
+
 def find_versioned_haxelib_tags(xml_text):
     tags = re.findall(r"<haxelib\b[^>]*/>", xml_text)
     results = []
@@ -83,6 +93,14 @@ def main():
     mismatches = []
     for name, expected_version in seen.items():
         versions_on_disk = installed_versions(name)
+        if name in GIT_INSTALLED_LIBS:
+            if "git" in versions_on_disk or versions_on_disk:
+                print(f"  \u2713 {name}: installed via git (pinned by ref, not by haxelib version string)")
+            else:
+                found = "(none installed)"
+                print(f"  \u2717 {name}: expected a git install, found: {found}")
+                mismatches.append((name, "git install", found))
+            continue
         if expected_version in versions_on_disk:
             print(f"  \u2713 {name}: {expected_version} is installed")
         else:
@@ -107,3 +125,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
