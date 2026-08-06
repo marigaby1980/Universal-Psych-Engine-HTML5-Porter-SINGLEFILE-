@@ -338,6 +338,59 @@ def replace_discord_client(engine_dir):
         print("No Discord.hx referencing hxdiscord_rpc/discord_rpc found — nothing to replace.")
 
 
+# flixel-addons' TransitionFade.hx declares empty classes like
+# `class RawGraphicDiagonalGradient extends BitmapData {}` purely to
+# trigger OpenFL's @:autoBuild(AssetsMacro.embedBitmap()) compile-time
+# asset-embedding macro (the same mechanism used throughout OpenFL/Flixel
+# for auto-embedding bundled images by naming convention). On this
+# toolchain that macro crashes with an uncaught null-access exception
+# while reading the target PNG's bytes — reproduced identically whether
+# flixel-addons is installed from the haxelib registry or fresh via
+# `haxelib git` (i.e. with the complete, unmodified repository present),
+# which rules out a missing/incomplete package as the cause. Since the
+# crash is in the *macro's* asset-embedding step, not in any code that
+# actually runs, and the empty class's only purpose is to be a BitmapData
+# subclass, removing the "extends BitmapData" is enough to stop the macro
+# from running for these classes without needing to touch anything else
+# in the file. This does mean flixel-addons' built-in transition graphics
+# (circle/square/diamond/diagonal-gradient wipes) won't be available if a
+# mod's own code actually calls into FlxTransitionableState/TransitionFade
+# expecting them; most Psych mods don't touch this system directly, and
+# a working build without this cosmetic feature is a better outcome than
+# blocking the whole compile over it.
+TRANSITION_RAW_GRAPHIC_PATTERN = re.compile(
+    r"class\s+(RawGraphicTransTile\w+|RawGraphicDiagonalGradient)\s+extends\s+BitmapData\s*\{\}"
+)
+
+
+def patch_transition_asset_macro(haxelib_dir):
+    """
+    Finds flixel-addons' TransitionFade.hx (registry or git install, any
+    version) under haxelib_dir and neutralizes the BitmapData-subclassing
+    pattern that triggers OpenFL's crashing auto-embed macro.
+    """
+    if not haxelib_dir or not os.path.isdir(haxelib_dir):
+        return
+    candidates = glob.glob(os.path.join(haxelib_dir, "flixel-addons", "**", "TransitionFade.hx"), recursive=True)
+    if not candidates:
+        print("No flixel-addons TransitionFade.hx found — skipping transition-asset-macro patch.")
+        return
+    for path in candidates:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        patched, count = TRANSITION_RAW_GRAPHIC_PATTERN.subn(
+            lambda m: f"class {m.group(1)} {{}}",
+            text,
+        )
+        if count == 0:
+            print(f"{path}: no matching RawGraphic*/BitmapData pattern found (already patched or different structure).")
+            continue
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(patched)
+        print(f"Patched {path}: removed 'extends BitmapData' from {count} transition graphic class(es) "
+              f"to prevent the AssetsMacro null-access crash.")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--engine-dir", required=True)
@@ -370,6 +423,9 @@ def main():
 
     rewrite_source_tree(args.engine_dir, extra_dirs=extra_dirs)
     patch_flx_sound_tray(args.engine_dir)
+
+    if extra_dirs:
+        patch_transition_asset_macro(extra_dirs[0])
 
     print("Engine patching complete.")
 
