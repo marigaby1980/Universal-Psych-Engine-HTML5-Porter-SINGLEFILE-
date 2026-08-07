@@ -8,12 +8,12 @@ an assets/ folder, typically) and inlines everything into ONE standalone
 build as a base64 data: URI, patched into the virtual filesystem the
 Lime/OpenFL HTML5 target expects.
 
-Hard-fails (non-zero exit) if the resulting file would exceed --max-bytes,
-which defaults to just under GitHub's 100MB per-file push limit. This is
-intentional: a mod that produces a single-file HTML larger than that limit
-literally cannot be pushed to a GitHub repo via a normal commit, so silently
-producing an oversized file would just move the failure downstream and
-make it more confusing.
+Reports the result via GITHUB_OUTPUT (final_size_bytes, fits_in_repo) so
+the calling workflow can choose how to deliver the file: committed
+directly to the repo if it fits under GitHub's ~100MB git-push limit, or
+uploaded as a GitHub Release asset (up to ~2GB) if it doesn't. Only exits
+non-zero if the file exceeds even the Release asset ceiling, since at that
+point there's no GitHub-native way to deliver a single file that large.
 """
 
 import argparse
@@ -189,6 +189,7 @@ def main():
     parser.add_argument("--build-dir", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--max-bytes", type=int, default=99_000_000)
+    parser.add_argument("--max-release-bytes", type=int, default=1_950_000_000)
     args = parser.parse_args()
 
     build_dir = args.build_dir
@@ -238,18 +239,42 @@ def main():
     final_size = os.path.getsize(output_path)
     print(f"Final standalone HTML size: {human(final_size)} ({final_size:,} bytes)")
 
-    if final_size > args.max_bytes:
+    # Surface the result to the calling workflow step via GITHUB_OUTPUT so
+    # it can decide how to deliver the file: a normal git push works fine
+    # under the limit, but GitHub rejects git pushes of files over 100MB
+    # outright — for anything over that (but still under the 2GB GitHub
+    # Release asset ceiling), the workflow falls back to uploading the
+    # file as a Release asset instead of committing it to the repo.
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    fits_in_repo = final_size <= args.max_bytes
+    fits_in_release = final_size <= args.max_release_bytes
+
+    if github_output:
+        with open(github_output, "a", encoding="utf-8") as f:
+            f.write(f"final_size_bytes={final_size}\n")
+            f.write(f"fits_in_repo={'true' if fits_in_repo else 'false'}\n")
+
+    if fits_in_repo:
+        print("Size OK — within GitHub's single-file push limit, will be committed directly to the repo.")
+    elif fits_in_release:
         over_by = final_size - args.max_bytes
-        print("::error::" + (
+        print("::warning::" + (
             f"Standalone HTML is {human(final_size)}, which exceeds the {human(args.max_bytes)} "
-            f"limit by {human(over_by)}. GitHub rejects pushes of files over 100MB, so this build "
-            f"cannot be committed as a single file. This mod is too large to produce as one "
-            f"self-contained HTML — consider a smaller mod/week, or a non-single-file hosting "
-            f"approach (index.html + separate asset files)."
+            f"repo push limit by {human(over_by)}. GitHub rejects a normal git push of files over "
+            f"100MB, so this build cannot be committed directly to the repo. The file was still "
+            f"built successfully and will be uploaded as a GitHub Release asset instead (supports "
+            f"up to 2GB) in the next step."
+        ))
+    else:
+        over_by = final_size - args.max_release_bytes
+        print("::error::" + (
+            f"Standalone HTML is {human(final_size)}, which exceeds even the {human(args.max_release_bytes)} "
+            f"GitHub Release asset limit by {human(over_by)}. This mod is too large to deliver as a "
+            f"single file through any GitHub-native mechanism — consider a smaller mod/week, or a "
+            f"non-single-file hosting approach (index.html + separate asset files, or external "
+            f"storage such as itch.io)."
         ))
         sys.exit(1)
-
-    print("Size OK — within GitHub's single-file push limit.")
 
 
 if __name__ == "__main__":
