@@ -257,8 +257,14 @@ REGEX_REWRITES = [
     # copy-pasted from native-target code where a different import chain
     # happened to pull it in transitively), it fails with "Type not
     # found". Route bare, unqualified Path references to the fully
-    # qualified standard library class explicitly.
-    (r"(?<!\.)(?<!class )\bPath\b", "haxe.io.Path"),
+    # qualified standard library class explicitly. Excludes `Path:` (no
+    # preceding dot/colon) since that shape is a function PARAMETER named
+    # "Path" being type-annotated (`fromTextureAtlas(Path:String)`, a
+    # real flxanimate signature using capitalized argument names) rather
+    # than a reference to the Path class — the class is only ever used as
+    # `Path.method(...)`, `new Path(...)`, or after its own colon as a
+    # type annotation (`x:Path`), never immediately followed by a colon.
+    (r"(?<!\.)(?<!class )\bPath\b(?!\s*:)", "haxe.io.Path"),
     (r"sys\.thread\.Thread", "Thread"),
     (r"sys\.thread\.Mutex", "Mutex"),
     (r"sys\.thread\.FixedThreadPool", "ThreadPool"),
