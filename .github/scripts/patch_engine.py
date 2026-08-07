@@ -512,7 +512,9 @@ def patch_file_dialog_handler_path(engine_dir):
 # graphics, cursor icons, and a text-typing sound effect, not
 # gameplay-critical content.
 ASSET_MACRO_METADATA_PATTERN = re.compile(
-    r'(?:@:keep\s*)?@:(bitmap|sound|file|font)\(\s*"[^"]*"\s*\)\s*(?:@:keep\s*)?\s*(?:private\s+)?class\s+(\w+)\s+extends\s+(BitmapData|Sound)\s*\{\}'
+    r'@:(bitmap|sound|file|font)\(\s*"[^"]*"\s*\)'
+    r'(?:\s*@:\w+(?:\([^)]*\))?)*'  # any number of other metadata tags in between (e.g. @:keep, @:noCompletion)
+    r'\s*(?:private\s+)?class\s+(\w+)\s+extends\s+(BitmapData|Sound)\s*\{\}'
 )
 
 
