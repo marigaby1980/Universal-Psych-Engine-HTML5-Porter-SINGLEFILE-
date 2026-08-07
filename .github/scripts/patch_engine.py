@@ -250,6 +250,28 @@ REGEX_REWRITES = [
     (r"(?<!\.)(?<!class )\bFileSystem\b", "psychporter.compat.FileSystem"),
     (r"(?<!\.)(?<!class )\bFile\b(?!System)", "psychporter.compat.File"),
     (r"sys\.io\.Process", "Process"),
+    # Psych Engine's own options.Option class (source/options/Option.hx)
+    # is colliding with the browser's NATIVE JavaScript `Option`
+    # constructor — new Option(text, value, defaultSelected, selected),
+    # part of HTMLOptionElement/js.html — which is globally visible on
+    # the JS/HTML5 target without an import, the exact same collision
+    # class as js.html.File/js.html.FileSystem encountered earlier. This
+    # is what actually produces the confusing "String should be Bool,
+    # for optional function argument 'defaultSelected'" errors across
+    # every GraphicsSettingsSubState/VisualsSettingsSubState/
+    # GameplaySettingsSubState call site — confirmed by cross-referencing
+    # the real Option.hx (no defaultSelected parameter exists there) and
+    # the real call sites (perfectly valid 4-argument calls matching
+    # Option.hx's actual constructor) against MDN's Option() constructor
+    # signature, which matches exactly. Since every mod's own copy of
+    # Option.hx lives in the `options` package, qualify `new Option(`
+    # constructor calls to `new options.Option(` so resolution is
+    # unambiguous regardless of what's implicitly visible at the top
+    # level. Scoped to the constructor-call shape specifically (not a
+    # bare `Option` type-annotation rewrite) since that's the exact
+    # pattern confirmed failing, and it's a much narrower, lower-risk
+    # target than a blanket bare-identifier rewrite would be.
+    (r"(?<!\.)\bnew Option\(", "new options.Option("),
     # FlxG.error(...) isn't a real flixel API — the actual method is
     # FlxG.log.error(...). Psych's CoolUtil.hx calls the former directly;
     # this may be a latent bug in Psych's own source that HTML5's build
