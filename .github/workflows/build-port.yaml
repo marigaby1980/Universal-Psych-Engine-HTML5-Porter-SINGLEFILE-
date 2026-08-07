@@ -232,12 +232,17 @@ jobs:
           python3 "${GITHUB_WORKSPACE}/repo/.github/scripts/bundle_single_file.py" \
             --build-dir "." \
             --output "${GITHUB_WORKSPACE}/${{ inputs.output_filename }}" \
-            --max-bytes 99000000
+            --max-bytes 99000000 \
+            --max-release-bytes 1950000000
 
       # ------------------------------------------------------------------
-      # 7. Commit the single HTML file to the repo root
+      # 7. Deliver the single HTML file: commit to repo root if it fits
+      #    under GitHub's git-push limit, otherwise fall back to a
+      #    GitHub Release asset (up to ~2GB) so large builds still reach
+      #    the person instead of the job just failing.
       # ------------------------------------------------------------------
       - name: Commit standalone HTML to repo root
+        if: steps.bundle.outputs.fits_in_repo == 'true'
         run: |
           set -e
           cd repo
@@ -251,6 +256,26 @@ jobs:
             git commit -m "Automated Psych Engine web port: ${{ inputs.output_filename }}"
             git push
           fi
+
+      - name: Upload standalone HTML as a GitHub Release (large builds)
+        if: steps.bundle.outputs.fits_in_repo == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          cd repo
+          TAG="web-build-${{ github.run_number }}"
+          echo "File is too large to commit directly (${{ steps.bundle.outputs.final_size_bytes }} bytes) — publishing as a GitHub Release asset instead."
+          gh release create "$TAG" \
+            "${GITHUB_WORKSPACE}/${{ inputs.output_filename }}" \
+            --title "Web build ${{ github.run_number }}" \
+            --notes "Automated Psych Engine web port. This build (${{ steps.bundle.outputs.final_size_bytes }} bytes) exceeds GitHub's 100MB repo file limit, so it's published here as a Release asset instead of committed to the repo root. Download the .html file below and open it directly in a browser." \
+            --repo "${{ github.repository }}"
+          echo "Release published. Download link will be shown in the job summary."
+          echo "### Large build published as a Release" >> "$GITHUB_STEP_SUMMARY"
+          echo "This build (${{ steps.bundle.outputs.final_size_bytes }} bytes) was too large to commit to the repo directly, so it was uploaded to a GitHub Release instead:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**[Download ${{ inputs.output_filename }}](https://github.com/${{ github.repository }}/releases/tag/$TAG)**" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload build artifact (backup / debugging)
         if: always()
