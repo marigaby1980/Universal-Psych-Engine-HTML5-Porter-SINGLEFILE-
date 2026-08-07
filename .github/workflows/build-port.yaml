@@ -219,7 +219,7 @@ jobs:
             --include="*.hx" | grep -v "^source/Thread.hx\|^source/Mutex.hx" || echo "(no direct sys.thread references found)"
           echo "--- End diagnostic scan ---"
 
-          haxelib run lime build html5 -release -D DISCORD_DISABLE -D NO_PRELOAD_ALL
+          haxelib run lime build html5 -release -D DISCORD_DISABLE -D NO_PRELOAD_ALL -D FLX_NO_DEBUG
 
       # ------------------------------------------------------------------
       # 6. Inline everything into ONE standalone .html file
