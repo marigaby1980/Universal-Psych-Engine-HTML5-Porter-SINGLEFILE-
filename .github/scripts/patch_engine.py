@@ -214,9 +214,17 @@ REGEX_REWRITES = [
     # (e.g. relying on the engine's own now-removed top-level stub, or a
     # local import alias). Word-boundary anchored, and deliberately NOT
     # applied to already-qualified names like js.html.File or
-    # psychporter.compat.File (negative lookbehind for a preceding dot).
-    (r"(?<!\.)\bFileSystem\b", "psychporter.compat.FileSystem"),
-    (r"(?<!\.)\bFile\b(?!System)", "psychporter.compat.File"),
+    # psychporter.compat.File (negative lookbehind for a preceding dot),
+    # AND NOT applied to the class's own declaration (negative lookbehind
+    # for a preceding "class " — `class File {` is where the name is
+    # DEFINED, not a reference to rewrite; rewriting it produces the
+    # invalid `class psychporter.compat.File {`, which is what this
+    # exists to prevent). This runs across the whole source tree
+    # including our own freshly-written stub files, so the declaration
+    # inside psychporter/compat/File.hx itself must be protected the same
+    # way any other class's own declaration would need to be.
+    (r"(?<!\.)(?<!class )\bFileSystem\b", "psychporter.compat.FileSystem"),
+    (r"(?<!\.)(?<!class )\bFile\b(?!System)", "psychporter.compat.File"),
     (r"sys\.io\.Process", "Process"),
     (r"sys\.thread\.Thread", "Thread"),
     (r"sys\.thread\.Mutex", "Mutex"),
