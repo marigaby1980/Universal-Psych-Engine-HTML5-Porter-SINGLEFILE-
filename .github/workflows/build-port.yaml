@@ -108,18 +108,41 @@ jobs:
         run: |
           set -e
           cd engine-source
-          mkdir -p mods assets
+          mkdir -p mods
 
-          # Psych mods can ship files meant for assets/ (songs, images, data,
-          # etc. that the engine reads directly) — copy broadly and let the
-          # engine's existing folder structure absorb it. -n = don't clobber
-          # engine core files with mod folders that happen to share a name.
-          cp -rn ../mods_upload/* assets/ 2>/dev/null || true
-          cp -rn ../mods_upload/* mods/   2>/dev/null || true
+          # Psych Engine's own convention (confirmed via the engine's
+          # example_mods README): ALL mod content — new content AND
+          # replacements for base-game assets — goes under mods/, never
+          # directly into assets/. The engine merges mods/ over assets/
+          # itself at runtime. Copying into assets/ was not just
+          # unnecessary but actively harmful: assets/ already exists with
+          # real subfolders from the engine checkout (assets/shared,
+          # assets/base_game, etc.), so a no-clobber copy there would
+          # silently skip almost every file the mod provides, since most
+          # destination paths already existed. That's what caused two
+          # different mods to produce suspiciously similar/identical
+          # output sizes — most of each mod's unique content was quietly
+          # never being copied in at all.
+          #
+          # Uses rsync -a instead of `cp -rn`: a real recursive merge that
+          # overwrites files at the destination when the mod provides its
+          # own version of something, while leaving any engine file the
+          # mod doesn't touch alone. `cp -n` (no-clobber) would repeat the
+          # exact same silent-skip bug inside mods/ once it's no longer
+          # empty on a second run, or for any mod file path that happens
+          # to already exist there for any other reason.
+          if command -v rsync >/dev/null 2>&1; then
+            rsync -a ../mods_upload/ mods/
+          else
+            echo "rsync not found, installing..."
+            sudo apt-get update -qq && sudo apt-get install -y -qq rsync
+            rsync -a ../mods_upload/ mods/
+          fi
 
-          echo "Injected. assets/ and mods/ top level now:"
-          ls assets/ | head -30
-          echo "---"
+          echo "Injected. File counts:"
+          echo "  mods_upload (source): $(find ../mods_upload -type f | wc -l) files"
+          echo "  mods/ (destination, after merge): $(find mods -type f | wc -l) files"
+          echo "mods/ top level now:"
           ls mods/ | head -30
 
       # ------------------------------------------------------------------
