@@ -72,6 +72,29 @@ class StubBitmapData {
   public function copyPixels(source:Dynamic, sourceRect:Dynamic, destPoint:Dynamic, ?alphaBitmap:Dynamic, ?alphaPoint:Dynamic, mergeAlpha:Bool = false):Void {}
 }
 """,
+    "source/psychporter/compat/StubSound.hx": """\
+package psychporter.compat;
+// Minimal, non-crashing stand-in for openfl.media.Sound — same rationale
+// as StubBitmapData above: some haxelib source does
+// `class SomeRawSound extends Sound {}` purely to trigger OpenFL's
+// crashing @:autoBuild(AssetsMacro) asset-embed macro (the Sound variant
+// of the same bug that affects BitmapData). This does not actually
+// decode or play audio; anything relying on real playback from one of
+// these will not work correctly, but the previous state was a hard
+// compile failure, so silent audio is strictly an improvement.
+class StubSound {
+  public var length(default, null):Float = 0;
+  public var bytesLoaded(default, null):Float = 0;
+  public var bytesTotal(default, null):Float = -1;
+  public var id3(default, null):Dynamic;
+
+  public function new(?stream:Dynamic, ?context:Dynamic) {}
+
+  public function load(stream:Dynamic, ?context:Dynamic):Void {}
+  public function close():Void {}
+  public function play(startTime:Float = 0, loops:Int = 0, ?sndTransform:Dynamic):Dynamic return null;
+}
+""",
     "source/psychporter/compat/File.hx": """\
 package psychporter.compat;
 class File {
@@ -191,6 +214,7 @@ class Types {
 class ThreadPool {
   public function new(threadsCount:Int = 1) {}
   public function submit(task:Void->Void):Void { if (task != null) task(); }
+  public function run(task:Void->Void):Void { if (task != null) task(); }
   public function shutdown():Void {}
   public var isShutdown(get, never):Bool;
   function get_isShutdown():Bool return true;
@@ -226,6 +250,15 @@ REGEX_REWRITES = [
     (r"(?<!\.)(?<!class )\bFileSystem\b", "psychporter.compat.FileSystem"),
     (r"(?<!\.)(?<!class )\bFile\b(?!System)", "psychporter.compat.File"),
     (r"sys\.io\.Process", "Process"),
+    # haxe.io.Path is a genuine cross-platform standard library class
+    # (works fine on HTML5) but isn't auto-imported the way some other
+    # std classes are — if source code uses the bare `Path` identifier
+    # without importing it (observed in FileDialogHandler.hx, likely
+    # copy-pasted from native-target code where a different import chain
+    # happened to pull it in transitively), it fails with "Type not
+    # found". Route bare, unqualified Path references to the fully
+    # qualified standard library class explicitly.
+    (r"(?<!\.)(?<!class )\bPath\b", "haxe.io.Path"),
     (r"sys\.thread\.Thread", "Thread"),
     (r"sys\.thread\.Mutex", "Mutex"),
     (r"sys\.thread\.FixedThreadPool", "ThreadPool"),
@@ -360,6 +393,8 @@ class DiscordClient {
   public static function changePresence(details:String, ?state:String, ?smallImageKey:String,
       ?hasStartTimestamp:Bool, ?endTimestamp:Float):Void {}
   public static function resetClientID():Void {}
+  public static function check():Void {}
+  public static function prepare():Void {}
 
   #if LUA_ALLOWED
   public static function addLuaCallbacks(lua:Dynamic):Void {}
@@ -453,6 +488,14 @@ TRANSITION_RAW_GRAPHIC_PATTERN = re.compile(
     r"class\s+(\w+)\s+extends\s+BitmapData\s*\{\}"
 )
 
+# Same crash, same fix, for openfl.media.Sound subclasses (observed:
+# flixel-addons' FlxTypeText.hx has `class TypeSound extends Sound {}`,
+# triggering AssetsMacro.embedSound() the same way BitmapData subclasses
+# trigger embedBitmap()).
+ASSET_MACRO_SOUND_PATTERN = re.compile(
+    r"class\s+(\w+)\s+extends\s+Sound\s*\{\}"
+)
+
 # Directories under a haxelib install that are safe to skip: test suites,
 # samples, and docs sometimes contain their own throwaway BitmapData
 # subclasses that aren't part of what actually gets compiled, and
@@ -463,10 +506,11 @@ _SKIP_DIR_NAMES = {"test", "tests", "samples", "sample", "demo", "demos", "docs"
 def patch_asset_macro_bitmapdata_classes(haxelib_dir):
     """
     Scans every .hx file across the whole haxelib install directory and
-    neutralizes the `class X extends BitmapData {}` pattern that triggers
-    OpenFL's crashing auto-embed macro, regardless of which library it's
-    declared in. See the module-level comment above for why this is
-    scoped this broadly rather than to one specific package.
+    neutralizes the `class X extends BitmapData {}` / `class X extends
+    Sound {}` patterns that trigger OpenFL's crashing auto-embed macro
+    (embedBitmap() / embedSound() respectively), regardless of which
+    library declares them. See the module-level comment above for why
+    this is scoped this broadly rather than to one specific package.
     """
     if not haxelib_dir or not os.path.isdir(haxelib_dir):
         return
@@ -480,25 +524,35 @@ def patch_asset_macro_bitmapdata_classes(haxelib_dir):
             continue
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
-        if "extends BitmapData" not in text:
+        if "extends BitmapData" not in text and "extends Sound" not in text:
             continue
-        patched, count = TRANSITION_RAW_GRAPHIC_PATTERN.subn(
-            lambda m: f"class {m.group(1)} extends psychporter.compat.StubBitmapData {{}}",
-            text,
-        )
-        if count == 0:
+        original = text
+        file_class_count = 0
+        if "extends BitmapData" in text:
+            text, count = TRANSITION_RAW_GRAPHIC_PATTERN.subn(
+                lambda m: f"class {m.group(1)} extends psychporter.compat.StubBitmapData {{}}",
+                text,
+            )
+            file_class_count += count
+        if "extends Sound" in text:
+            text, count = ASSET_MACRO_SOUND_PATTERN.subn(
+                lambda m: f"class {m.group(1)} extends psychporter.compat.StubSound {{}}",
+                text,
+            )
+            file_class_count += count
+        if file_class_count == 0:
             continue
         with open(path, "w", encoding="utf-8") as f:
-            f.write(patched)
-        print(f"Patched {path}: removed 'extends BitmapData' from {count} class(es) "
+            f.write(text)
+        print(f"Patched {path}: neutralized {file_class_count} AssetsMacro-triggering class(es) "
               f"to prevent the AssetsMacro null-access crash.")
         total_patched_files += 1
-        total_patched_classes += count
+        total_patched_classes += file_class_count
 
     if total_patched_files == 0:
-        print("No BitmapData auto-embed pattern found anywhere under the haxelib directory — nothing to patch.")
+        print("No BitmapData/Sound auto-embed pattern found anywhere under the haxelib directory — nothing to patch.")
     else:
-        print(f"AssetsMacro BitmapData patch: {total_patched_classes} class(es) across {total_patched_files} file(s).")
+        print(f"AssetsMacro patch: {total_patched_classes} class(es) across {total_patched_files} file(s).")
 
 
 def main():
