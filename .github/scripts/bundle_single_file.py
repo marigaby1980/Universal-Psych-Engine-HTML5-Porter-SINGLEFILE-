@@ -217,6 +217,28 @@ def main():
     html = re.sub(r'<script[^>]+src=["\'][^"\']+["\'][^>]*></script>', "", html, flags=re.IGNORECASE)
     html = re.sub(r'<link[^>]+rel=["\']stylesheet["\'][^>]*>', "", html, flags=re.IGNORECASE)
 
+    # The original index.html also contains INLINE <script> blocks with no
+    # src attribute — critically, the lime.embed(...) bootstrap call that
+    # actually starts the game. That call depends on globals (lime,
+    # openfl, etc.) defined by the compiled engine JS. In the original
+    # build, script execution order guaranteed the engine JS file loaded
+    # before this inline block ran. Appending the engine JS at the end of
+    # <body> (below) while leaving this inline block in its original,
+    # earlier position breaks that ordering: the embed call would fire
+    # before the engine exists to be embedded, silently doing nothing —
+    # this is what produced a black screen with no visible error. Extract
+    # every remaining inline <script> block (preserving relative order)
+    # and move them to run AFTER the engine code instead of wherever they
+    # originally sat in the document.
+    inline_script_pattern = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.IGNORECASE | re.DOTALL)
+    extracted_inline_scripts = inline_script_pattern.findall(html)
+    html = inline_script_pattern.sub("", html)
+    bootstrap_js = "\n".join(s.strip() for s in extracted_inline_scripts if s.strip())
+    if extracted_inline_scripts:
+        print(f"Deferred {len(extracted_inline_scripts)} inline <script> block(s) "
+              f"(e.g. the lime.embed bootstrap call) to run after the engine code, "
+              f"preserving their original relative order.")
+
     inline_block = (
         "<script>\n"
         + manifest_js
@@ -226,6 +248,8 @@ def main():
         + main_js
         + "\n</script>\n"
     )
+    if bootstrap_js:
+        inline_block += "<script>\n" + bootstrap_js + "\n</script>\n"
 
     if "</body>" in html:
         html = html.replace("</body>", inline_block + "</body>")
