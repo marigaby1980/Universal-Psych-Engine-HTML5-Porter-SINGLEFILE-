@@ -19,7 +19,8 @@ import glob
 
 
 STUBS = {
-    "source/FileSystem.hx": """\
+    "source/psychporter/compat/FileSystem.hx": """\
+package psychporter.compat;
 class FileSystem {
   public static function absolutePath(path:String) return path;
   public static function exists(path:String) return false;
@@ -33,7 +34,46 @@ class FileSystem {
   public static function rename(p1:String, p2:String) {}
 }
 """,
-    "source/File.hx": """\
+    "source/psychporter/compat/StubBitmapData.hx": """\
+package psychporter.compat;
+// Minimal, non-crashing stand-in for openfl.display.BitmapData, used as
+// the new base class for haxelib source that previously did
+// `class SomeRawGraphic extends BitmapData {}` purely to trigger
+// OpenFL's @:autoBuild(AssetsMacro.embedBitmap()) — a macro that crashes
+// on this toolchain (see patch_asset_macro_bitmapdata_classes). This
+// exists so that subclasses/callers depending on BitmapData's
+// constructor signature or width/height fields still compile, without
+// ever extending the real BitmapData (and therefore never triggering the
+// crashing macro). It does not attempt to actually hold or render pixel
+// data — anything calling pixel-manipulation methods on one of these
+// will not work correctly, but the previous state was a hard compile
+// failure, so an inert graphic is strictly an improvement.
+class StubBitmapData {
+  public var width:Int;
+  public var height:Int;
+  public var rect(get, never):Dynamic;
+  public var transparent:Bool;
+
+  public function new(width:Int = 0, height:Int = 0, transparent:Bool = true, ?fillColor:Int, ?onLoad:Dynamic) {
+    this.width = width;
+    this.height = height;
+    this.transparent = transparent;
+  }
+
+  function get_rect():Dynamic return { x: 0, y: 0, width: width, height: height };
+
+  public function clone():StubBitmapData return new StubBitmapData(width, height, transparent);
+  public function dispose():Void {}
+  public function fillRect(rect:Dynamic, color:Int):Void {}
+  public function getPixel(x:Int, y:Int):Int return 0;
+  public function getPixel32(x:Int, y:Int):Int return 0;
+  public function setPixel(x:Int, y:Int, color:Int):Void {}
+  public function setPixel32(x:Int, y:Int, color:Int):Void {}
+  public function copyPixels(source:Dynamic, sourceRect:Dynamic, destPoint:Dynamic, ?alphaBitmap:Dynamic, ?alphaPoint:Dynamic, mergeAlpha:Bool = false):Void {}
+}
+""",
+    "source/psychporter/compat/File.hx": """\
+package psychporter.compat;
 class File {
   public static function getContent(path:String) return "";
   public static function getBytes(path:String) return null;
@@ -159,8 +199,24 @@ class ThreadPool {
 }
 
 REGEX_REWRITES = [
-    (r"sys\.FileSystem", "FileSystem"),
-    (r"sys\.io\.File", "File"),
+    # FileSystem/File specifically: the JS/HTML5 target has real
+    # js.html.FileSystem / js.html.File browser DOM APIs, which are
+    # visible without an explicit import and can resolve ahead of an
+    # unqualified top-level stub class of the same name (observed:
+    # File.getContent() resolving to js.html.File, which has no such
+    # method, rather than our stub). Rewriting to a fully package-
+    # qualified reference makes resolution unambiguous regardless of
+    # what's implicitly visible at the top level.
+    (r"sys\.FileSystem", "psychporter.compat.FileSystem"),
+    (r"sys\.io\.File\b", "psychporter.compat.File"),
+    # Bare references to the same two — covers source files that use
+    # File/FileSystem unqualified without ever writing the sys.* prefix
+    # (e.g. relying on the engine's own now-removed top-level stub, or a
+    # local import alias). Word-boundary anchored, and deliberately NOT
+    # applied to already-qualified names like js.html.File or
+    # psychporter.compat.File (negative lookbehind for a preceding dot).
+    (r"(?<!\.)\bFileSystem\b", "psychporter.compat.FileSystem"),
+    (r"(?<!\.)\bFile\b(?!System)", "psychporter.compat.File"),
     (r"sys\.io\.Process", "Process"),
     (r"sys\.thread\.Thread", "Thread"),
     (r"sys\.thread\.Mutex", "Mutex"),
@@ -372,11 +428,19 @@ def replace_discord_client(engine_dir):
 # asset-embedding step, not in any code that actually runs, and each
 # empty class's only purpose is to be a BitmapData subclass, removing the
 # "extends BitmapData" is enough to stop the macro from running for these
-# classes without needing to touch anything else in the file. This does
-# mean the associated bundled graphic (cursor images, transition wipes,
-# etc.) won't be available if code actually instantiates the public
-# wrapper class around it; a working build without a cosmetic built-in
-# asset is a better outcome than blocking the whole compile over it.
+# classes without needing to touch anything else in the file. However,
+# these "Raw" classes are not purely decorative — real code elsewhere
+# (observed: TransitionFade.hx's GraphicDiagonalGradient extends
+# RawGraphicDiagonalGradient, calling `super(WIDTH, HEIGHT, true,
+# 0xFFffffff, onLoad)` and setting `this.width`/`this.height`) depends on
+# them behaving like a minimal BitmapData: same constructor signature,
+# and width/height fields. A bare `class X {}` breaks that call site with
+# "no field width" errors. So instead of an empty class, each match is
+# replaced with a class extending psychporter.compat.StubBitmapData (see
+# STUBS above) — a minimal, non-crashing BitmapData stand-in that accepts
+# the same constructor arguments and exposes width/height as real fields,
+# while never triggering AssetsMacro since it doesn't extend the real
+# openfl.display.BitmapData at all.
 TRANSITION_RAW_GRAPHIC_PATTERN = re.compile(
     r"class\s+(\w+)\s+extends\s+BitmapData\s*\{\}"
 )
@@ -411,7 +475,7 @@ def patch_asset_macro_bitmapdata_classes(haxelib_dir):
         if "extends BitmapData" not in text:
             continue
         patched, count = TRANSITION_RAW_GRAPHIC_PATTERN.subn(
-            lambda m: f"class {m.group(1)} {{}}",
+            lambda m: f"class {m.group(1)} extends psychporter.compat.StubBitmapData {{}}",
             text,
         )
         if count == 0:
