@@ -272,6 +272,17 @@ REGEX_REWRITES = [
     # pattern confirmed failing, and it's a much narrower, lower-risk
     # target than a blanket bare-identifier rewrite would be.
     (r"(?<!\.)\bnew Option\(", "new options.Option("),
+    # Same collision, different position: the TYPE ANNOTATION `:Option`
+    # (var option:Option = ..., function params, Array<Option>, class
+    # fields like `curOption:Option` confirmed in BaseOptionsMenu.hx) also
+    # resolves to js.html.Option rather than options.Option, even after
+    # the constructor-call fix above — confirmed by a follow-up compile
+    # showing "options.Option should be js.html.Option" at the variable
+    # declaration itself once the right-hand side was correctly typed.
+    # Qualifies any `:Option` type-position occurrence, including inside
+    # generics like Array<Option>.
+    (r":\s*Option\b(?!\w)", ":options.Option"),
+    (r"Array<Option>", "Array<options.Option>"),
     # FlxG.error(...) isn't a real flixel API — the actual method is
     # FlxG.log.error(...). Psych's CoolUtil.hx calls the former directly;
     # this may be a latent bug in Psych's own source that HTML5's build
@@ -286,6 +297,15 @@ REGEX_REWRITES = [
     # rather than something that compiles. Replaced with a safe literal
     # since there's no meaningful HTML5 equivalent for native GC stats.
     (r"cpp\.vm\.Gc\.memInfo64\(cpp\.vm\.Gc\.MEM_INFO_USAGE\)", "0"),
+    # getCPUThreadsCount() is an Unknown identifier on HTML5 — a
+    # native-only hardware-thread-count query (likely from a
+    # conditionally-compiled native helper, or a macro-injected function
+    # only available on cpp/hl targets) used in LoadingState.hx purely to
+    # size a thread pool. Since threading itself is already neutralized
+    # on this target (see ThreadPool stub above, which runs everything
+    # synchronously on the single JS thread), the actual thread count
+    # value is irrelevant here — substitute a safe constant.
+    (r"getCPUThreadsCount\(\)", "1"),
     (r"sys\.thread\.Thread", "Thread"),
     (r"sys\.thread\.Mutex", "Mutex"),
     (r"sys\.thread\.FixedThreadPool", "ThreadPool"),
