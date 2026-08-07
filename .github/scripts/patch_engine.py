@@ -265,6 +265,20 @@ REGEX_REWRITES = [
     # `Path.method(...)`, `new Path(...)`, or after its own colon as a
     # type annotation (`x:Path`), never immediately followed by a colon.
     (r"(?<!\.)(?<!class )\bPath\b(?!\s*:)", "haxe.io.Path"),
+    # FlxG.error(...) isn't a real flixel API — the actual method is
+    # FlxG.log.error(...). Psych's CoolUtil.hx calls the former directly;
+    # this may be a latent bug in Psych's own source that HTML5's build
+    # happens to surface. Redirect it to the real API rather than leave
+    # a call to a nonexistent method.
+    (r"FlxG\.error\(", "FlxG.log.error("),
+    # cpp.vm.Gc.memInfo64(cpp.vm.Gc.MEM_INFO_USAGE) is native-only memory
+    # introspection with no HTML5 equivalent. Matched here, BEFORE the
+    # generic cpp.* rewrite below runs, since that generic rule only
+    # strips one dotted path segment at a time (cpp.vm -> Dynamic) and
+    # would leave a dangling, still-broken `Dynamic.Gc.memInfo64(...)`
+    # rather than something that compiles. Replaced with a safe literal
+    # since there's no meaningful HTML5 equivalent for native GC stats.
+    (r"cpp\.vm\.Gc\.memInfo64\(cpp\.vm\.Gc\.MEM_INFO_USAGE\)", "0"),
     (r"sys\.thread\.Thread", "Thread"),
     (r"sys\.thread\.Mutex", "Mutex"),
     (r"sys\.thread\.FixedThreadPool", "ThreadPool"),
@@ -280,6 +294,11 @@ REGEX_REWRITES = [
     (r"\bElasticThreadPool\b", "ThreadPool"),
     (r"^\s*import cpp[^\n]*\n", ""),
     (r"cpp\.[a-zA-Z0-9_]+", "Dynamic"),
+    # Fallback for the same Gc pattern in case the original wasn't
+    # exactly cpp.vm.Gc (unconfirmed — inferred from the already-rewritten
+    # form seen in a compile error) and the primary pattern above missed
+    # it, leaving the generic cpp.* rule's dangling Dynamic.Gc output.
+    (r"Dynamic\.Gc\.memInfo64\(Dynamic\.Gc\.MEM_INFO_USAGE\)", "0"),
     (r"^\s*import llua[^\n]*\n", ""),
     (r"llua\.[a-zA-Z0-9_]+", "Dynamic"),
 ]
@@ -443,61 +462,79 @@ def replace_discord_client(engine_dir):
         print("No Discord.hx referencing hxdiscord_rpc/discord_rpc found — nothing to replace.")
 
 
-# flixel-addons' TransitionFade.hx declares empty classes like
-# `class RawGraphicDiagonalGradient extends BitmapData {}` purely to
-# trigger OpenFL's @:autoBuild(AssetsMacro.embedBitmap()) compile-time
-# asset-embedding macro (the same mechanism used throughout OpenFL/Flixel
-# for auto-embedding bundled images by naming convention). On this
-# toolchain that macro crashes with an uncaught null-access exception
-# while reading the target PNG's bytes — reproduced identically whether
-# flixel-addons is installed from the haxelib registry or fresh via
-# `haxelib git` (i.e. with the complete, unmodified repository present),
-# which rules out a missing/incomplete package as the cause. Since the
-# crash is in the *macro's* asset-embedding step, not in any code that
-# actually runs, and the empty class's only purpose is to be a BitmapData
-# subclass, removing the "extends BitmapData" is enough to stop the macro
-# from running for these classes without needing to touch anything else
-# in the file. This does mean flixel-addons' built-in transition graphics
-# flixel-addons' TransitionFade.hx declares empty classes like
-# `class RawGraphicDiagonalGradient extends BitmapData {}` purely to
-# trigger OpenFL's @:autoBuild(AssetsMacro.embedBitmap()) compile-time
-# asset-embedding macro (the same mechanism used throughout OpenFL/Flixel
-# for auto-embedding bundled images by naming convention, always in the
-# shape `@:bitmap("path/to/image.png") class SomeRawGraphic extends
-# BitmapData {}`). On this toolchain that macro crashes with an uncaught
-# null-access exception while reading the target PNG's bytes. This isn't
-# limited to flixel-addons — the identical pattern was also observed
-# crashing on flixel core's own FlxMouse.hx (GraphicCursor extends
-# BitmapData {}), confirming this is a general AssetsMacro incompatibility
-# on this Haxe/OpenFL combination, not something specific to one library's
-# packaging. Rather than chase every individual occurrence across every
-# haxelib as each one surfaces in turn, this scans and neutralizes the
-# pattern everywhere it appears across the whole haxelib install
-# directory in one pass. Since the crash is in the *macro's*
-# asset-embedding step, not in any code that actually runs, and each
-# empty class's only purpose is to be a BitmapData subclass, removing the
-# "extends BitmapData" is enough to stop the macro from running for these
-# classes without needing to touch anything else in the file. However,
-# these "Raw" classes are not purely decorative — real code elsewhere
-# (observed: TransitionFade.hx's GraphicDiagonalGradient extends
-# RawGraphicDiagonalGradient, calling `super(WIDTH, HEIGHT, true,
-# 0xFFffffff, onLoad)` and setting `this.width`/`this.height`) depends on
-# them behaving like a minimal BitmapData: same constructor signature,
-# and width/height fields. A bare `class X {}` breaks that call site with
-# "no field width" errors. So instead of an empty class, each match is
-# replaced with a class extending psychporter.compat.StubBitmapData (see
-# STUBS above) — a minimal, non-crashing BitmapData stand-in that accepts
-# the same constructor arguments and exposes width/height as real fields,
-# while never triggering AssetsMacro since it doesn't extend the real
-# openfl.display.BitmapData at all.
+# flixel-addons' TransitionFade.hx (and other haxelib source) declares
+# empty classes like `class RawGraphicDiagonalGradient extends BitmapData
+# {}` purely to trigger OpenFL's @:autoBuild(AssetsMacro.embedBitmap())
+# compile-time asset-embedding macro (the same mechanism used throughout
+# OpenFL/Flixel for auto-embedding bundled images by naming convention,
+# always in the shape `@:bitmap("path/to/image.png") class SomeRawGraphic
+# extends BitmapData {}`). On this toolchain that macro crashes with an
+# uncaught null-access exception while reading the target asset's bytes —
+# reproduced identically whether the library is installed from the
+# haxelib registry or fresh via `haxelib git` (i.e. with the complete,
+# unmodified repository present), which rules out a missing/incomplete
+# package as the cause, and reproduced on a minimal Context.addResource()
+# test case unrelated to OpenFL entirely — this is a generic Haxe/hxcpp
+# compiler-macro incompatibility on this toolchain, not something fixable
+# by better packaging or a different asset.
+#
+# The fix keeps the REAL "extends BitmapData"/"extends Sound" inheritance
+# (so nominal typing is satisfied everywhere flixel code requires a
+# literal Class<BitmapData> — e.g. FlxGraphic.fromClass(), debug-tool
+# cursors — which a structurally-similar-but-different stand-in class
+# fails, since Haxe's typing is nominal here, and @:autoBuild metadata
+# propagates down the FULL inheritance chain regardless of how many
+# levels deep, so no indirect stand-in can dodge the crash while staying
+# a real BitmapData/Sound), but strips the specific
+# `@:bitmap("path.png")` / `@:sound("path.ogg")` metadata that triggers
+# AssetsMacro's crashing compile-time embed, replacing the class body
+# with a constructor that builds a valid placeholder at RUNTIME instead —
+# BitmapData's own constructor (width, height, transparent, fillColor)
+# creates real solid-color pixel data with no macro involvement at all,
+# sidestepping the crash entirely rather than working around its
+# consequences. The result is a plain placeholder (solid-color square /
+# silent audio) instead of the real bundled asset — an acceptable
+# tradeoff for what are exclusively debug-tool icons, preloader splash
+# graphics, cursor icons, and a text-typing sound effect, not
+# gameplay-critical content.
+ASSET_MACRO_METADATA_PATTERN = re.compile(
+    r'@:(bitmap|sound|file|font)\(\s*"[^"]*"\s*\)\s*\n\s*(?:private\s+)?class\s+(\w+)\s+extends\s+(BitmapData|Sound)\s*\{\}'
+)
+
+
+def _asset_macro_replacement(match):
+    kind = match.group(1)  # "bitmap" or "sound"
+    class_name = match.group(2)
+    base = match.group(3)  # "BitmapData" or "Sound"
+    if base == "BitmapData":
+        return (
+            f"class {class_name} extends BitmapData {{\n"
+            f"  public function new(width:Int = 8, height:Int = 8, ?transparent:Bool, ?fillColor:Int, ?onLoad:Dynamic) {{\n"
+            f"    super(width != null && width > 0 ? width : 8, height != null && height > 0 ? height : 8, "
+            f"transparent == null ? true : transparent, fillColor == null ? 0xFFCCCCCC : fillColor);\n"
+            f"  }}\n"
+            f"}}"
+        )
+    else:
+        return (
+            f"class {class_name} extends Sound {{\n"
+            f"  public function new(?stream:Dynamic, ?context:Dynamic) {{ super(); }}\n"
+            f"}}"
+        )
+
+
+# Fallback pattern for any BitmapData-extending empty class that doesn't
+# have the @:bitmap/@:sound metadata directly on the preceding line (e.g.
+# blank lines in between, or no metadata at all — meaning there's nothing
+# for ASSET_MACRO_METADATA_PATTERN to strip). Falls back to the
+# StubBitmapData/StubSound stand-ins for those, which avoids the crash by
+# not being a real BitmapData/Sound at all — accepting the tradeoff that
+# strict Class<BitmapData> typing won't be satisfied for whatever rare
+# case reaches this fallback, since avoiding the crash takes priority.
 TRANSITION_RAW_GRAPHIC_PATTERN = re.compile(
     r"class\s+(\w+)\s+extends\s+BitmapData\s*\{\}"
 )
 
-# Same crash, same fix, for openfl.media.Sound subclasses (observed:
-# flixel-addons' FlxTypeText.hx has `class TypeSound extends Sound {}`,
-# triggering AssetsMacro.embedSound() the same way BitmapData subclasses
-# trigger embedBitmap()).
 ASSET_MACRO_SOUND_PATTERN = re.compile(
     r"class\s+(\w+)\s+extends\s+Sound\s*\{\}"
 )
@@ -512,11 +549,13 @@ _SKIP_DIR_NAMES = {"test", "tests", "samples", "sample", "demo", "demos", "docs"
 def patch_asset_macro_bitmapdata_classes(haxelib_dir):
     """
     Scans every .hx file across the whole haxelib install directory and
-    neutralizes the `class X extends BitmapData {}` / `class X extends
-    Sound {}` patterns that trigger OpenFL's crashing auto-embed macro
-    (embedBitmap() / embedSound() respectively), regardless of which
-    library declares them. See the module-level comment above for why
-    this is scoped this broadly rather than to one specific package.
+    neutralizes classes that trigger OpenFL's crashing AssetsMacro
+    auto-embed, regardless of which library declares them. Tries the
+    metadata-stripping approach first (ASSET_MACRO_METADATA_PATTERN,
+    preserves real BitmapData/Sound inheritance so nominal typing still
+    works everywhere), and falls back to the stand-in-class approach
+    (StubBitmapData/StubSound) for any occurrence that pattern doesn't
+    match. See the module-level comment above for the full rationale.
     """
     if not haxelib_dir or not os.path.isdir(haxelib_dir):
         return
@@ -532,8 +571,16 @@ def patch_asset_macro_bitmapdata_classes(haxelib_dir):
             text = f.read()
         if "extends BitmapData" not in text and "extends Sound" not in text:
             continue
-        original = text
         file_class_count = 0
+
+        # Primary approach: strip @:bitmap/@:sound metadata, keep real
+        # inheritance, runtime-construct a placeholder instead.
+        text, count = ASSET_MACRO_METADATA_PATTERN.subn(_asset_macro_replacement, text)
+        file_class_count += count
+
+        # Fallback: anything still matching the bare empty-class pattern
+        # (no metadata line directly above it for the primary pattern to
+        # have caught) goes to the stand-in-class approach.
         if "extends BitmapData" in text:
             text, count = TRANSITION_RAW_GRAPHIC_PATTERN.subn(
                 lambda m: f"class {m.group(1)} extends psychporter.compat.StubBitmapData {{}}",
@@ -546,6 +593,7 @@ def patch_asset_macro_bitmapdata_classes(haxelib_dir):
                 text,
             )
             file_class_count += count
+
         if file_class_count == 0:
             continue
         with open(path, "w", encoding="utf-8") as f:
