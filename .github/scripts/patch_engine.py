@@ -250,21 +250,6 @@ REGEX_REWRITES = [
     (r"(?<!\.)(?<!class )\bFileSystem\b", "psychporter.compat.FileSystem"),
     (r"(?<!\.)(?<!class )\bFile\b(?!System)", "psychporter.compat.File"),
     (r"sys\.io\.Process", "Process"),
-    # haxe.io.Path is a genuine cross-platform standard library class
-    # (works fine on HTML5) but isn't auto-imported the way some other
-    # std classes are — if source code uses the bare `Path` identifier
-    # without importing it (observed in FileDialogHandler.hx, likely
-    # copy-pasted from native-target code where a different import chain
-    # happened to pull it in transitively), it fails with "Type not
-    # found". Route bare, unqualified Path references to the fully
-    # qualified standard library class explicitly. Excludes `Path:` (no
-    # preceding dot/colon) since that shape is a function PARAMETER named
-    # "Path" being type-annotated (`fromTextureAtlas(Path:String)`, a
-    # real flxanimate signature using capitalized argument names) rather
-    # than a reference to the Path class — the class is only ever used as
-    # `Path.method(...)`, `new Path(...)`, or after its own colon as a
-    # type annotation (`x:Path`), never immediately followed by a colon.
-    (r"(?<!\.)(?<!class )\bPath\b(?!\s*:)", "haxe.io.Path"),
     # FlxG.error(...) isn't a real flixel API — the actual method is
     # FlxG.log.error(...). Psych's CoolUtil.hx calls the former directly;
     # this may be a latent bug in Psych's own source that HTML5's build
@@ -462,6 +447,35 @@ def replace_discord_client(engine_dir):
         print("No Discord.hx referencing hxdiscord_rpc/discord_rpc found — nothing to replace.")
 
 
+# haxe.io.Path is a genuine cross-platform standard library class (works
+# fine on HTML5) but isn't auto-imported the way some other std classes
+# are — FileDialogHandler.hx uses the bare `Path` identifier
+# (Path.extension(...), Path.withoutDirectory(...)) without importing it,
+# failing with "Type not found". This is deliberately scoped to this one
+# file rather than applied as a global rewrite: a global bare-`Path`
+# rewrite was tried and reverted after it collided with unrelated code
+# using "Path" as a local variable/parameter name elsewhere (observed in
+# flxanimate's FlxAnimateFrames.hx) — regex can't reliably distinguish a
+# variable read from a class reference when both look identical
+# (`Path`), so the safe fix is to only touch the one file where this
+# specific usage is confirmed unambiguous (always `Path.method(...)`, a
+# clean method-call shape, never a bare variable read).
+_PATH_METHOD_CALL_PATTERN = re.compile(r"(?<!\.)(?<!\w)Path\.(extension|withoutDirectory|withoutExtension|directory|join|normalize|addTrailingSlash|removeTrailingSlash|isAbsolute)\(")
+
+
+def patch_file_dialog_handler_path(engine_dir):
+    candidates = glob.glob(os.path.join(engine_dir, "**", "FileDialogHandler.hx"), recursive=True)
+    for path in candidates:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        patched, count = _PATH_METHOD_CALL_PATTERN.subn(r"haxe.io.Path.\1(", text)
+        if count == 0:
+            continue
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(patched)
+        print(f"Patched {path}: qualified {count} bare Path.method(...) call(s) to haxe.io.Path.")
+
+
 # flixel-addons' TransitionFade.hx (and other haxelib source) declares
 # empty classes like `class RawGraphicDiagonalGradient extends BitmapData
 # {}` purely to trigger OpenFL's @:autoBuild(AssetsMacro.embedBitmap())
@@ -498,7 +512,7 @@ def replace_discord_client(engine_dir):
 # graphics, cursor icons, and a text-typing sound effect, not
 # gameplay-critical content.
 ASSET_MACRO_METADATA_PATTERN = re.compile(
-    r'@:(bitmap|sound|file|font)\(\s*"[^"]*"\s*\)\s*\n\s*(?:private\s+)?class\s+(\w+)\s+extends\s+(BitmapData|Sound)\s*\{\}'
+    r'(?:@:keep\s*)?@:(bitmap|sound|file|font)\(\s*"[^"]*"\s*\)\s*(?:@:keep\s*)?\s*(?:private\s+)?class\s+(\w+)\s+extends\s+(BitmapData|Sound)\s*\{\}'
 )
 
 
@@ -630,6 +644,7 @@ def main():
     write_stubs(args.engine_dir)
     strip_discord_from_project_xml(args.engine_dir)
     replace_discord_client(args.engine_dir)
+    patch_file_dialog_handler_path(args.engine_dir)
 
     extra_dirs = []
     if args.haxelib_dir:
