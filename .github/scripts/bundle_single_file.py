@@ -289,81 +289,62 @@ SHIM_JS = r"""
   function ShimXHR() {
     var xhr = new OrigXHR();
     var origOpen = xhr.open;
-    var origSetRequestHeader = xhr.setRequestHeader;
     xhr.open = function (method, url) {
       var embedded = resolve(url);
       if (embedded) {
-        // Call the REAL native open(), but with a harmless placeholder
-        // URL instead of skipping it entirely. Two earlier approaches
-        // both failed against real captured stack traces:
-        //   1. Passing the original relative asset path straight
-        //      through: native open() throws "SyntaxError: The string
-        //      did not match the expected pattern" — a relative path
-        //      like "assets/song.ogg" can't resolve to a valid URL
-        //      inside a document.write()-constructed page with no real
+        // Open against a genuine blob: URL for the already-decoded Blob,
+        // and let the REAL native XHR machinery handle everything else
+        // (send, readyState transitions, status, response) rather than
+        // manually faking each of those properties one at a time — that
+        // approach kept failing at a new spot each time a different
+        // internal browser state was involved (readyState after open(),
+        // then setRequestHeader's own internal "was this really opened"
+        // tracking separate from the public readyState property). Three
+        // placeholder URL schemes were tried and rejected before this:
+        //   1. The raw relative asset path itself: native open() throws
+        //      "SyntaxError: The string did not match the expected
+        //      pattern" — not resolvable to a valid URL inside a
+        //      document.write()-constructed page with no real
         //      base/server behind it.
-        //   2. Skipping the native open() call altogether and just
-        //      faking xhr.readyState via Object.defineProperty: the
-        //      browser's XHR implementation tracks its "was open()
-        //      really called" state internally, separately from the
-        //      public readyState property — faking the property doesn't
-        //      fake the internal state, so the very next real call
-        //      (setRequestHeader) throws "InvalidStateError: The object
-        //      is in an invalid state", since the native object never
-        //      actually progressed past UNSENT internally.
-        // A syntactically-valid but semantically-meaningless URL (the
-        // page's own current location) satisfies open()'s validation
-        // and genuinely advances the native internal state machine,
-        // while still being intercepted below in send() before any real
-        // network request would occur.
-        this.__embeddedMatch = embedded;
+        //   2. Skipping open() and faking xhr.readyState via
+        //      Object.defineProperty: the browser's real internal
+        //      "was open() genuinely called" state is tracked
+        //      separately from the public property, so the very next
+        //      call (setRequestHeader) threw "InvalidStateError".
+        //   3. window.location.href as a syntactically-valid
+        //      placeholder: inside this bundle's context that resolves
+        //      to the literal string "about:blank", and "about" is a
+        //      scheme XHR/fetch implementations don't support for
+        //      actually establishing a request — this reproduced the
+        //      exact same failure 100% of the time rather than
+        //      intermittently, consistent with a scheme-level rejection
+        //      rather than a memory-pressure-driven one.
+        // blob: is the one scheme purpose-built for exactly this: a
+        // same-origin, genuinely fetchable reference to in-memory binary
+        // data, which is precisely what an already-decoded embedded
+        // asset is.
+        var blob = getBlob(embedded);
+        var blobUrl = URL.createObjectURL(blob);
         this.__isEmbedded = true;
-        return origOpen.call(this, method, String(window.location.href), true);
+        this.__embeddedBlobUrl = blobUrl;
+        return origOpen.call(this, method, blobUrl, true);
       }
       return origOpen.apply(this, arguments);
-    };
-    xhr.setRequestHeader = function (name, value) {
-      if (this.__isEmbedded) {
-        // No real request is happening for an embedded asset — headers
-        // are meaningless here. Silently accept rather than pass through
-        // to the native call, which is harmless either way once open()
-        // has genuinely run, but skipping it avoids any header-related
-        // native validation (e.g. calling this on a completed request)
-        // interfering with the synthesized response in send() below.
-        return;
-      }
-      return origSetRequestHeader.apply(this, arguments);
     };
     var origSend = xhr.send;
     xhr.send = function () {
       if (this.__isEmbedded) {
+        // Real native send() against the real blob: URL — no manual
+        // property faking needed, the browser handles the actual load
+        // and fires the normal onload/onreadystatechange events itself.
+        // Revoke the blob URL once the request completes to avoid
+        // accumulating unreleased object URLs over many asset loads.
         var self = this;
-        try {
-          var blob = getBlob(this.__embeddedMatch);
-          setTimeout(function () {
-            try {
-              var reader = new FileReader();
-              reader.onload = function () {
-                Object.defineProperty(self, "response", { value: reader.result, configurable: true });
-                Object.defineProperty(self, "responseText", { value: "", configurable: true });
-                Object.defineProperty(self, "status", { value: 200, configurable: true });
-                Object.defineProperty(self, "readyState", { value: 4, configurable: true });
-                if (self.onreadystatechange) self.onreadystatechange();
-                if (self.onload) self.onload();
-              };
-              if (self.responseType === "arraybuffer" || self.responseType === "blob") {
-                reader.readAsArrayBuffer(blob);
-              } else {
-                reader.readAsText(blob);
-              }
-            } catch (__psychShimErr) {
-              if (window.__psychReportError) window.__psychReportError(__psychShimErr);
-            }
-          }, 0);
-        } catch (__psychShimErr2) {
-          if (window.__psychReportError) window.__psychReportError(__psychShimErr2);
-        }
-        return;
+        var blobUrl = this.__embeddedBlobUrl;
+        this.addEventListener("loadend", function () {
+          try { URL.revokeObjectURL(blobUrl); } catch (e) {}
+        });
+        return origSend.apply(this, arguments);
       }
       return origSend.apply(this, arguments);
     };
