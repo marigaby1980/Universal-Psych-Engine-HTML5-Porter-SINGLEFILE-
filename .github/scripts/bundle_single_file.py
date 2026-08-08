@@ -113,6 +113,24 @@ ERROR_OVERLAY_JS = r"""
 // still needed to diagnose a build.
 (function () {
   var errors = [];
+  var errorCounts = Object.create(null);
+  var MAX_DISTINCT_ERRORS = 20;
+
+  // Deduplicates by exact message text with a running occurrence count,
+  // rather than pushing every occurrence individually — a single
+  // systemic failure (e.g. every one of 262 embedded assets hitting the
+  // same underlying bug) would otherwise bury the one distinct, useful
+  // message under 260+ near-identical repeats, making the overlay
+  // unreadable right when it matters most.
+  function pushError(text) {
+    if (errorCounts[text]) {
+      errorCounts[text]++;
+      return;
+    }
+    if (errors.length >= MAX_DISTINCT_ERRORS) return;
+    errorCounts[text] = 1;
+    errors.push(text);
+  }
 
   function renderOverlay() {
     var existing = document.getElementById("__psych_error_overlay__");
@@ -124,8 +142,12 @@ ERROR_OVERLAY_JS = r"""
       "background:rgba(10,10,15,0.96);color:#f5f5f5;font-family:monospace;font-size:13px;" +
       "padding:16px;overflow:auto;box-sizing:border-box;";
 
+    var totalOccurrences = 0;
+    for (var key in errorCounts) if (errorCounts.hasOwnProperty(key)) totalOccurrences += errorCounts[key];
+
     var title = document.createElement("div");
-    title.textContent = "Build failed to start — " + errors.length + " error(s) captured";
+    title.textContent = "Build failed to start — " + errors.length + " distinct error(s), " +
+      totalOccurrences + " total occurrence(s)";
     title.style.cssText = "font-size:16px;font-weight:bold;margin-bottom:10px;color:#ff6b6b;";
     overlay.appendChild(title);
 
@@ -136,7 +158,10 @@ ERROR_OVERLAY_JS = r"""
 
     var textArea = document.createElement("textarea");
     textArea.readOnly = true;
-    textArea.value = errors.join("\n\n---\n\n");
+    textArea.value = errors.map(function (text) {
+      var count = errorCounts[text];
+      return (count > 1 ? "[x" + count + "] " : "") + text;
+    }).join("\n\n---\n\n");
     textArea.style.cssText = "width:100%;height:60%;background:#1a1a1f;color:#e0e0e0;" +
       "border:1px solid #444;padding:8px;box-sizing:border-box;white-space:pre;font-family:monospace;";
     overlay.appendChild(textArea);
@@ -167,14 +192,14 @@ ERROR_OVERLAY_JS = r"""
   }
 
   window.addEventListener("error", function (event) {
-    errors.push(formatError(event.message, event.filename, event.lineno, event.colno, event.error));
+    pushError(formatError(event.message, event.filename, event.lineno, event.colno, event.error));
     renderOverlay();
   });
 
   window.addEventListener("unhandledrejection", function (event) {
     var reason = event.reason;
     var message = (reason && reason.message) ? reason.message : String(reason);
-    errors.push(formatError("Unhandled promise rejection: " + message, null, null, null, reason));
+    pushError(formatError("Unhandled promise rejection: " + message, null, null, null, reason));
     renderOverlay();
   });
 
@@ -189,7 +214,7 @@ ERROR_OVERLAY_JS = r"""
   // content-free "Script error." with no message, source, or stack.
   window.__psychReportError = function (error) {
     var message = (error && error.message) ? error.message : String(error);
-    errors.push(formatError("Caught during boot: " + message, null, null, null, error));
+    pushError(formatError("Caught during boot: " + message, null, null, null, error));
     renderOverlay();
   };
 })();
@@ -343,6 +368,32 @@ SHIM_JS = r"""
         var blobUrl = this.__embeddedBlobUrl;
         this.addEventListener("loadend", function () {
           try { URL.revokeObjectURL(blobUrl); } catch (e) {}
+        });
+        // Diagnostic: a failed blob: URL load fires a native "error"
+        // event, NOT a throwable JS exception — so it would never reach
+        // try/catch-based reporting (__psychReportError), and would only
+        // ever surface via the generic window.onerror path, which is
+        // exactly the content-free "Script error." sanitization this is
+        // meant to get past. Report it explicitly and directly here
+        // instead, with as much real detail as the event/xhr object
+        // exposes (status, readyState — genuine values here since
+        // they're read from a real completed/failed native request, not
+        // a faked property).
+        this.addEventListener("error", function () {
+          if (window.__psychReportError) {
+            window.__psychReportError(new Error(
+              "XHR native error event for embedded asset blob URL. " +
+              "status=" + self.status + " readyState=" + self.readyState +
+              " blobUrl=" + blobUrl
+            ));
+          }
+        });
+        this.addEventListener("abort", function () {
+          if (window.__psychReportError) {
+            window.__psychReportError(new Error(
+              "XHR aborted for embedded asset blob URL. blobUrl=" + blobUrl
+            ));
+          }
         });
         return origSend.apply(this, arguments);
       }
