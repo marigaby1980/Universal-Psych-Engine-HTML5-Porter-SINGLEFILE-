@@ -177,6 +177,21 @@ ERROR_OVERLAY_JS = r"""
     errors.push(formatError("Unhandled promise rejection: " + message, null, null, null, reason));
     renderOverlay();
   });
+
+  // Exposed for explicit try/catch blocks elsewhere in the bundle (e.g.
+  // around the lime.embed bootstrap call) to report a caught exception
+  // directly, with full detail intact. This bypasses the browser's
+  // same-origin error-sanitization entirely — that sanitization only
+  // applies to the window.onerror global handler above, not to an error
+  // object a script already has in hand from its own try/catch. This is
+  // the reliable path when the page is opened as a file:// URL, which
+  // browsers treat as an opaque origin and reduces window.onerror to a
+  // content-free "Script error." with no message, source, or stack.
+  window.__psychReportError = function (error) {
+    var message = (error && error.message) ? error.message : String(error);
+    errors.push(formatError("Caught during boot: " + message, null, null, null, error));
+    renderOverlay();
+  };
 })();
 """
 
@@ -224,23 +239,31 @@ SHIM_JS = r"""
     xhr.send = function () {
       if (this.__isEmbedded) {
         var self = this;
-        var blob = dataUriToBlob(this.__embeddedData);
-        setTimeout(function () {
-          var reader = new FileReader();
-          reader.onload = function () {
-            Object.defineProperty(self, "response", { value: reader.result, configurable: true });
-            Object.defineProperty(self, "responseText", { value: "", configurable: true });
-            Object.defineProperty(self, "status", { value: 200, configurable: true });
-            Object.defineProperty(self, "readyState", { value: 4, configurable: true });
-            if (self.onreadystatechange) self.onreadystatechange();
-            if (self.onload) self.onload();
-          };
-          if (self.responseType === "arraybuffer" || self.responseType === "blob") {
-            reader.readAsArrayBuffer(blob);
-          } else {
-            reader.readAsText(blob);
-          }
-        }, 0);
+        try {
+          var blob = dataUriToBlob(this.__embeddedData);
+          setTimeout(function () {
+            try {
+              var reader = new FileReader();
+              reader.onload = function () {
+                Object.defineProperty(self, "response", { value: reader.result, configurable: true });
+                Object.defineProperty(self, "responseText", { value: "", configurable: true });
+                Object.defineProperty(self, "status", { value: 200, configurable: true });
+                Object.defineProperty(self, "readyState", { value: 4, configurable: true });
+                if (self.onreadystatechange) self.onreadystatechange();
+                if (self.onload) self.onload();
+              };
+              if (self.responseType === "arraybuffer" || self.responseType === "blob") {
+                reader.readAsArrayBuffer(blob);
+              } else {
+                reader.readAsText(blob);
+              }
+            } catch (__psychShimErr) {
+              if (window.__psychReportError) window.__psychReportError(__psychShimErr);
+            }
+          }, 0);
+        } catch (__psychShimErr2) {
+          if (window.__psychReportError) window.__psychReportError(__psychShimErr2);
+        }
         return;
       }
       return origSend.apply(this, arguments);
@@ -251,10 +274,14 @@ SHIM_JS = r"""
 
   var origFetch = window.fetch;
   window.fetch = function (input, init) {
-    var url = typeof input === "string" ? input : input.url;
-    var embedded = resolve(url);
-    if (embedded) {
-      return origFetch(embedded, init);
+    try {
+      var url = typeof input === "string" ? input : input.url;
+      var embedded = resolve(url);
+      if (embedded) {
+        return origFetch(embedded, init);
+      }
+    } catch (__psychShimErr3) {
+      if (window.__psychReportError) window.__psychReportError(__psychShimErr3);
     }
     return origFetch.apply(this, arguments);
   };
@@ -328,7 +355,26 @@ def main():
         + "\n</script>\n"
     )
     if bootstrap_js:
-        inline_block += "<script>\n" + bootstrap_js + "\n</script>\n"
+        # Wrapped in try/catch rather than left to window.onerror: when
+        # this HTML is opened directly from disk (a file:// URL, the most
+        # common way someone opens a single downloaded HTML file) rather
+        # than served over http(s), browsers treat the page as an opaque
+        # origin for error-reporting purposes the same way they treat a
+        # genuine cross-origin <script src>, and window.onerror is
+        # reduced to a content-free "Script error." with no message, no
+        # source location, and no stack — observed directly on a real
+        # build. A local try/catch is NOT subject to that suppression
+        # (it's not going through the onerror same-origin check at all),
+        # so it reliably surfaces the real error to the overlay above
+        # regardless of how the file is being opened.
+        inline_block += (
+            "<script>\ntry {\n"
+            + bootstrap_js
+            + "\n} catch (__psychBootErr) {\n"
+            + "  if (window.__psychReportError) window.__psychReportError(__psychBootErr);\n"
+            + "  else throw __psychBootErr;\n"
+            + "}\n</script>\n"
+        )
 
     error_overlay_block = "<script>\n" + ERROR_OVERLAY_JS + "\n</script>\n"
     if "<head>" in html:
