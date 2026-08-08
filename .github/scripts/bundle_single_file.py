@@ -205,9 +205,37 @@ SHIM_JS = r"""
 (function () {
   function resolve(url) {
     if (!url) return null;
-    var clean = url.replace(/^\.?\//, "").split("?")[0].split("#")[0];
-    if (window.__EMBEDDED_ASSETS__.hasOwnProperty(clean)) {
-      return window.__EMBEDDED_ASSETS__[clean];
+    var candidates = [];
+    var raw = String(url);
+    candidates.push(raw);
+
+    // Strip a single leading "./" or "/" (original behavior).
+    candidates.push(raw.replace(/^\.?\//, ""));
+
+    // Strip query string / fragment from every candidate so far.
+    var stripped = candidates.map(function (c) {
+      return c.split("?")[0].split("#")[0];
+    });
+    candidates = candidates.concat(stripped);
+
+    // If this resolves against a real or synthetic base URL (e.g. inside
+    // an about:blank page opened via document.write(), where relative
+    // paths can pick up an unexpected absolute prefix like
+    // "about:blank/assets/..." or "blob:.../assets/..."), take just
+    // everything from the first recognizable top-level asset folder
+    // name onward, so odd/unexpected prefixes don't prevent a match.
+    var topLevelMatch = raw.match(/(?:^|[\/:])((?:assets|flixel|mods)\/.+)$/);
+    if (topLevelMatch) candidates.push(topLevelMatch[1]);
+
+    // Strip any leading "../" segments repeatedly (handles paths that
+    // walk up from a nested request context).
+    candidates.push(raw.replace(/^(\.\.\/)+/, "").replace(/^\.?\//, ""));
+
+    for (var i = 0; i < candidates.length; i++) {
+      var clean = candidates[i];
+      if (clean && window.__EMBEDDED_ASSETS__.hasOwnProperty(clean)) {
+        return window.__EMBEDDED_ASSETS__[clean];
+      }
     }
     return null;
   }
@@ -227,35 +255,50 @@ SHIM_JS = r"""
   function ShimXHR() {
     var xhr = new OrigXHR();
     var origOpen = xhr.open;
+    var origSetRequestHeader = xhr.setRequestHeader;
     xhr.open = function (method, url) {
       var embedded = resolve(url);
       if (embedded) {
-        // Do NOT call the real native open() here. In this bundle's
-        // context (a page constructed via document.write() with no real
-        // server backing it — including when opened via the iOS viewer
-        // bookmarklet's about:blank tab), a relative asset path like
-        // "assets/songs/foo.ogg" cannot be resolved to a valid absolute
-        // URL, and the native XMLHttpRequest.open() throws
-        // "SyntaxError: The string did not match the expected pattern"
-        // — confirmed directly from a real captured stack trace. Since
-        // the entire response for an embedded asset is synthesized from
-        // the base64 manifest in send() below, open() never needs to
-        // touch the network layer at all for this path.
+        // Call the REAL native open(), but with a harmless placeholder
+        // URL instead of skipping it entirely. Two earlier approaches
+        // both failed against real captured stack traces:
+        //   1. Passing the original relative asset path straight
+        //      through: native open() throws "SyntaxError: The string
+        //      did not match the expected pattern" — a relative path
+        //      like "assets/song.ogg" can't resolve to a valid URL
+        //      inside a document.write()-constructed page with no real
+        //      base/server behind it.
+        //   2. Skipping the native open() call altogether and just
+        //      faking xhr.readyState via Object.defineProperty: the
+        //      browser's XHR implementation tracks its "was open()
+        //      really called" state internally, separately from the
+        //      public readyState property — faking the property doesn't
+        //      fake the internal state, so the very next real call
+        //      (setRequestHeader) throws "InvalidStateError: The object
+        //      is in an invalid state", since the native object never
+        //      actually progressed past UNSENT internally.
+        // A syntactically-valid but semantically-meaningless URL (the
+        // page's own current location) satisfies open()'s validation
+        // and genuinely advances the native internal state machine,
+        // while still being intercepted below in send() before any real
+        // network request would occur.
         this.__embeddedData = embedded;
         this.__isEmbedded = true;
-        this.__embeddedMethod = method;
-        this.__embeddedUrl = url;
-        // Native open() normally advances readyState from 0 (UNSENT) to
-        // 1 (OPENED) synchronously. Since we're skipping the native call
-        // entirely, set this ourselves so any caller-side code checking
-        // xhr.readyState between open() and send() sees the expected
-        // state rather than the object looking like open() was never
-        // called at all.
-        Object.defineProperty(this, "readyState", { value: 1, configurable: true });
-        if (this.onreadystatechange) this.onreadystatechange();
-        return;
+        return origOpen.call(this, method, String(window.location.href), true);
       }
       return origOpen.apply(this, arguments);
+    };
+    xhr.setRequestHeader = function (name, value) {
+      if (this.__isEmbedded) {
+        // No real request is happening for an embedded asset — headers
+        // are meaningless here. Silently accept rather than pass through
+        // to the native call, which is harmless either way once open()
+        // has genuinely run, but skipping it avoids any header-related
+        // native validation (e.g. calling this on a completed request)
+        // interfering with the synthesized response in send() below.
+        return;
+      }
+      return origSetRequestHeader.apply(this, arguments);
     };
     var origSend = xhr.send;
     xhr.send = function () {
