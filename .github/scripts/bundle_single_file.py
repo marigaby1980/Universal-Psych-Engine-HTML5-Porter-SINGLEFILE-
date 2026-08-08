@@ -230,8 +230,30 @@ SHIM_JS = r"""
     xhr.open = function (method, url) {
       var embedded = resolve(url);
       if (embedded) {
+        // Do NOT call the real native open() here. In this bundle's
+        // context (a page constructed via document.write() with no real
+        // server backing it — including when opened via the iOS viewer
+        // bookmarklet's about:blank tab), a relative asset path like
+        // "assets/songs/foo.ogg" cannot be resolved to a valid absolute
+        // URL, and the native XMLHttpRequest.open() throws
+        // "SyntaxError: The string did not match the expected pattern"
+        // — confirmed directly from a real captured stack trace. Since
+        // the entire response for an embedded asset is synthesized from
+        // the base64 manifest in send() below, open() never needs to
+        // touch the network layer at all for this path.
         this.__embeddedData = embedded;
         this.__isEmbedded = true;
+        this.__embeddedMethod = method;
+        this.__embeddedUrl = url;
+        // Native open() normally advances readyState from 0 (UNSENT) to
+        // 1 (OPENED) synchronously. Since we're skipping the native call
+        // entirely, set this ourselves so any caller-side code checking
+        // xhr.readyState between open() and send() sees the expected
+        // state rather than the object looking like open() was never
+        // called at all.
+        Object.defineProperty(this, "readyState", { value: 1, configurable: true });
+        if (this.onreadystatechange) this.onreadystatechange();
+        return;
       }
       return origOpen.apply(this, arguments);
     };
