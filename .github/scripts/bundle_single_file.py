@@ -202,7 +202,27 @@ SHIM_JS = r"""
 // base64 manifest embedded above, so the compiled Lime/OpenFL runtime
 // (which expects to fetch files like "assets/songs/foo.ogg" over HTTP)
 // works with zero external files.
+//
+// MEMORY DESIGN NOTE: each asset's base64 data: URI string is decoded
+// into a Blob LAZILY, on first request, then cached and the original
+// base64 string is discarded from the manifest immediately afterward.
+// The original design kept every asset's full base64 string resident in
+// memory for the entire page lifetime AND re-decoded it from scratch on
+// every single request (even repeat requests for the same asset) — on
+// iOS Safari specifically, holding many large strings plus repeated
+// decode-allocation churn is a documented trigger for the OS's Jetsam
+// process force-killing/reloading the tab under memory pressure, with no
+// catchable JS error at all when that happens (confirmed against a real
+// build: identical bytes produced a normal, detailed JS error on one
+// test and 150+ content-free "Script error." messages — consistent with
+// a partial page teardown — on another, purely as a function of runtime
+// memory conditions). Converting to a Blob once, and dropping the
+// string afterward, means peak memory reflects roughly the decoded
+// asset size once, not the base64 string size held indefinitely plus
+// repeated re-decode allocations on top.
 (function () {
+  var blobCache = Object.create(null);
+
   function resolve(url) {
     if (!url) return null;
     var candidates = [];
@@ -233,8 +253,10 @@ SHIM_JS = r"""
 
     for (var i = 0; i < candidates.length; i++) {
       var clean = candidates[i];
-      if (clean && window.__EMBEDDED_ASSETS__.hasOwnProperty(clean)) {
-        return window.__EMBEDDED_ASSETS__[clean];
+      if (!clean) continue;
+      if (blobCache[clean]) return { key: clean, blob: blobCache[clean] };
+      if (window.__EMBEDDED_ASSETS__.hasOwnProperty(clean)) {
+        return { key: clean, dataUri: window.__EMBEDDED_ASSETS__[clean] };
       }
     }
     return null;
@@ -249,6 +271,18 @@ SHIM_JS = r"""
     var arr = new Uint8Array(raw.length);
     for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
     return new Blob([arr], { type: mime });
+  }
+
+  // Resolves a manifest match down to an actual Blob, decoding and
+  // caching on first use, then freeing the base64 string from the
+  // manifest so it isn't held in memory twice (as a string AND as
+  // decoded Blob bytes) for the rest of the page's lifetime.
+  function getBlob(match) {
+    if (match.blob) return match.blob;
+    var blob = dataUriToBlob(match.dataUri);
+    blobCache[match.key] = blob;
+    delete window.__EMBEDDED_ASSETS__[match.key];
+    return blob;
   }
 
   var OrigXHR = window.XMLHttpRequest;
@@ -282,7 +316,7 @@ SHIM_JS = r"""
         // and genuinely advances the native internal state machine,
         // while still being intercepted below in send() before any real
         // network request would occur.
-        this.__embeddedData = embedded;
+        this.__embeddedMatch = embedded;
         this.__isEmbedded = true;
         return origOpen.call(this, method, String(window.location.href), true);
       }
@@ -305,7 +339,7 @@ SHIM_JS = r"""
       if (this.__isEmbedded) {
         var self = this;
         try {
-          var blob = dataUriToBlob(this.__embeddedData);
+          var blob = getBlob(this.__embeddedMatch);
           setTimeout(function () {
             try {
               var reader = new FileReader();
@@ -343,7 +377,8 @@ SHIM_JS = r"""
       var url = typeof input === "string" ? input : input.url;
       var embedded = resolve(url);
       if (embedded) {
-        return origFetch(embedded, init);
+        var blob = getBlob(embedded);
+        return Promise.resolve(new Response(blob));
       }
     } catch (__psychShimErr3) {
       if (window.__psychReportError) window.__psychReportError(__psychShimErr3);
