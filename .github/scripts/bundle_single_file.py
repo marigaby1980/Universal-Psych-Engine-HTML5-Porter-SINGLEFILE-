@@ -102,6 +102,85 @@ def build_asset_manifest_js(assets):
     return manifest_js, total_encoded
 
 
+ERROR_OVERLAY_JS = r"""
+// --- On-page error overlay --------------------------------------------
+// Installed as early as possible (before the asset shim and engine code)
+// so it catches failures at any point during boot, including errors that
+// happen before the game canvas ever appears. Shows a readable panel
+// with the error, stack trace, and a copy button — for when DevTools
+// isn't available (mobile browsers, some kiosk/embedded contexts, or
+// someone who just doesn't have it open) but the actual error text is
+// still needed to diagnose a build.
+(function () {
+  var errors = [];
+
+  function renderOverlay() {
+    var existing = document.getElementById("__psych_error_overlay__");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "__psych_error_overlay__";
+    overlay.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;z-index:999999;" +
+      "background:rgba(10,10,15,0.96);color:#f5f5f5;font-family:monospace;font-size:13px;" +
+      "padding:16px;overflow:auto;box-sizing:border-box;";
+
+    var title = document.createElement("div");
+    title.textContent = "Build failed to start — " + errors.length + " error(s) captured";
+    title.style.cssText = "font-size:16px;font-weight:bold;margin-bottom:10px;color:#ff6b6b;";
+    overlay.appendChild(title);
+
+    var hint = document.createElement("div");
+    hint.textContent = "Copy the text below and share it to diagnose the build.";
+    hint.style.cssText = "margin-bottom:10px;color:#aaa;";
+    overlay.appendChild(hint);
+
+    var textArea = document.createElement("textarea");
+    textArea.readOnly = true;
+    textArea.value = errors.join("\n\n---\n\n");
+    textArea.style.cssText = "width:100%;height:60%;background:#1a1a1f;color:#e0e0e0;" +
+      "border:1px solid #444;padding:8px;box-sizing:border-box;white-space:pre;font-family:monospace;";
+    overlay.appendChild(textArea);
+
+    var copyBtn = document.createElement("button");
+    copyBtn.textContent = "Copy to clipboard";
+    copyBtn.style.cssText = "margin-top:10px;padding:8px 16px;cursor:pointer;";
+    copyBtn.onclick = function () {
+      textArea.select();
+      try {
+        document.execCommand("copy");
+        copyBtn.textContent = "Copied!";
+        setTimeout(function () { copyBtn.textContent = "Copy to clipboard"; }, 1500);
+      } catch (e) {
+        if (navigator.clipboard) navigator.clipboard.writeText(textArea.value);
+      }
+    };
+    overlay.appendChild(copyBtn);
+
+    document.body.appendChild(overlay);
+  }
+
+  function formatError(message, source, lineno, colno, error) {
+    var lines = ["Message: " + message];
+    if (source) lines.push("Source: " + source + (lineno ? (":" + lineno + (colno ? ":" + colno : "")) : ""));
+    if (error && error.stack) lines.push("Stack:\n" + error.stack);
+    return lines.join("\n");
+  }
+
+  window.addEventListener("error", function (event) {
+    errors.push(formatError(event.message, event.filename, event.lineno, event.colno, event.error));
+    renderOverlay();
+  });
+
+  window.addEventListener("unhandledrejection", function (event) {
+    var reason = event.reason;
+    var message = (reason && reason.message) ? reason.message : String(reason);
+    errors.push(formatError("Unhandled promise rejection: " + message, null, null, null, reason));
+    renderOverlay();
+  });
+})();
+"""
+
+
 SHIM_JS = r"""
 // --- Single-file asset resolution shim -------------------------------
 // Redirects XHR/fetch requests for build-relative paths to the inline
@@ -250,6 +329,14 @@ def main():
     )
     if bootstrap_js:
         inline_block += "<script>\n" + bootstrap_js + "\n</script>\n"
+
+    error_overlay_block = "<script>\n" + ERROR_OVERLAY_JS + "\n</script>\n"
+    if "<head>" in html:
+        html = html.replace("<head>", "<head>\n" + error_overlay_block, 1)
+    elif "<html>" in html:
+        html = html.replace("<html>", "<html>\n" + error_overlay_block, 1)
+    else:
+        html = error_overlay_block + html
 
     if "</body>" in html:
         html = html.replace("</body>", inline_block + "</body>")
