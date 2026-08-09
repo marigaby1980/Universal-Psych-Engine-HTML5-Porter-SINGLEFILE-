@@ -228,6 +228,32 @@ SHIM_JS = r"""
 // (which expects to fetch files like "assets/songs/foo.ogg" over HTTP)
 // works with zero external files.
 //
+// LIVE STATUS READOUT: a small on-screen counter (bottom-left) tracks how
+// many embedded-asset requests have been opened vs. completed
+// successfully vs. failed. This exists because a stuck-at-0% preloader
+// with no error overlay is genuinely ambiguous — it could mean asset
+// loads are silently hanging, OR it could mean they're succeeding fine
+// but Lime's own progress-percentage display just isn't being driven by
+// this shim's blob: URL loads the way it expects. This readout answers
+// that directly instead of requiring another guess-and-rebuild cycle.
+window.__psychAssetStats = { opened: 0, loaded: 0, failed: 0 };
+(function () {
+  var statsEl = null;
+  function renderStats() {
+    if (!statsEl) {
+      statsEl = document.createElement("div");
+      statsEl.style.cssText = "position:fixed;bottom:0;left:0;z-index:999998;" +
+        "background:rgba(0,0,0,0.7);color:#0f0;font-family:monospace;font-size:11px;" +
+        "padding:4px 8px;pointer-events:none;";
+      document.body.appendChild(statsEl);
+    }
+    var s = window.__psychAssetStats;
+    statsEl.textContent = "assets: opened=" + s.opened + " loaded=" + s.loaded + " failed=" + s.failed;
+  }
+  window.__psychRenderAssetStats = renderStats;
+})();
+
+//
 // MEMORY DESIGN NOTE: each asset's base64 data: URI string is decoded
 // into a Blob LAZILY, on first request, then cached and the original
 // base64 string is discarded from the manifest immediately afterward.
@@ -352,6 +378,8 @@ SHIM_JS = r"""
         var blobUrl = URL.createObjectURL(blob);
         this.__isEmbedded = true;
         this.__embeddedBlobUrl = blobUrl;
+        window.__psychAssetStats.opened++;
+        if (window.__psychRenderAssetStats) window.__psychRenderAssetStats();
         return origOpen.call(this, method, blobUrl, true);
       }
       return origOpen.apply(this, arguments);
@@ -369,6 +397,10 @@ SHIM_JS = r"""
         this.addEventListener("loadend", function () {
           try { URL.revokeObjectURL(blobUrl); } catch (e) {}
         });
+        this.addEventListener("load", function () {
+          window.__psychAssetStats.loaded++;
+          if (window.__psychRenderAssetStats) window.__psychRenderAssetStats();
+        });
         // Diagnostic: a failed blob: URL load fires a native "error"
         // event, NOT a throwable JS exception — so it would never reach
         // try/catch-based reporting (__psychReportError), and would only
@@ -380,6 +412,8 @@ SHIM_JS = r"""
         // they're read from a real completed/failed native request, not
         // a faked property).
         this.addEventListener("error", function () {
+          window.__psychAssetStats.failed++;
+          if (window.__psychRenderAssetStats) window.__psychRenderAssetStats();
           if (window.__psychReportError) {
             window.__psychReportError(new Error(
               "XHR native error event for embedded asset blob URL. " +
@@ -389,6 +423,8 @@ SHIM_JS = r"""
           }
         });
         this.addEventListener("abort", function () {
+          window.__psychAssetStats.failed++;
+          if (window.__psychRenderAssetStats) window.__psychRenderAssetStats();
           if (window.__psychReportError) {
             window.__psychReportError(new Error(
               "XHR aborted for embedded asset blob URL. blobUrl=" + blobUrl
