@@ -375,10 +375,41 @@ window.__psychAssetStats = { opened: 0, loaded: 0, failed: 0 };
         // same-origin, genuinely fetchable reference to in-memory binary
         // data, which is precisely what an already-decoded embedded
         // asset is.
+        //
+        // ROOT CAUSE OF THE STUCK-AT-0% PRELOADER (found by reading the
+        // actual compiled engine JS directly): Lime's own
+        // HTML5HTTPRequest.__loadText/__loadBinary success check is
+        // `status >= 200 && status < 400 || (validStatus0 && status ==
+        // 0)` — and validStatus0 is set via
+        // `new EReg("Tizen","gi").match(navigator.userAgent)`, i.e. it's
+        // ONLY true on Samsung Tizen TV browsers, a narrow platform
+        // workaround, not a general one. blob: URLs universally report
+        // status 0 in every browser (this is standard, unavoidable
+        // browser behavior — not something fixable from this shim by
+        // choosing a "better" blob configuration). So on any non-Tizen
+        // browser, EVERY embedded asset load that reaches this check
+        // fails Lime's own success test and is silently routed to
+        // promise.error(...) instead of promise.complete(...) — even
+        // though the browser genuinely, successfully loaded the data
+        // (confirmed separately: opened/loaded counts and progress
+        // event byte counts were both perfect). This is why nothing
+        // ever advanced past the preloader despite every diagnostic
+        // showing successful loads: the failure was happening entirely
+        // inside Lime's own compiled success-check, invisible to any
+        // shim-level diagnostic that only observes the XHR layer itself.
+        // Fix: override the `status` property specifically for embedded
+        // asset requests to read as 200 rather than the blob: URL's
+        // native 0, satisfying Lime's check without needing Lime's code
+        // to change at all.
         var blob = getBlob(embedded);
         var blobUrl = URL.createObjectURL(blob);
         this.__isEmbedded = true;
         this.__embeddedBlobUrl = blobUrl;
+        try {
+          Object.defineProperty(this, "status", { value: 200, configurable: true });
+        } catch (__psychStatusErr) {
+          if (window.__psychReportError) window.__psychReportError(__psychStatusErr);
+        }
         window.__psychAssetStats.opened++;
         if (window.__psychRenderAssetStats) window.__psychRenderAssetStats();
         return origOpen.call(this, method, blobUrl, true);
