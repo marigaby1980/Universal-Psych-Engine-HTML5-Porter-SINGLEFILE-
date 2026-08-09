@@ -249,7 +249,8 @@ window.__psychAssetStats = { opened: 0, loaded: 0, failed: 0 };
     }
     var s = window.__psychAssetStats;
     statsEl.textContent = "assets: opened=" + s.opened + " loaded=" + s.loaded + " failed=" + s.failed +
-      (s.lastProgress ? " | progress: " + s.lastProgress : "");
+      (s.lastProgress ? " | progress: " + s.lastProgress : "") +
+      (s.lastReadyState4Status !== undefined ? " | status@rs4: " + s.lastReadyState4Status : "");
   }
   window.__psychRenderAssetStats = renderStats;
 })();
@@ -406,7 +407,18 @@ window.__psychAssetStats = { opened: 0, loaded: 0, failed: 0 };
         this.__isEmbedded = true;
         this.__embeddedBlobUrl = blobUrl;
         try {
-          Object.defineProperty(this, "status", { value: 200, configurable: true });
+          // Get-based override rather than a plain value, and applied
+          // to BOTH this instance and (defensively) checked again right
+          // before send() below — in case some browser-internal
+          // lifecycle step re-touches the property between open() and
+          // when Lime's own readystatechange handler reads it, which a
+          // one-time value-based override at open()-time wouldn't
+          // survive. A getter re-asserts 200 on every single read,
+          // regardless of when that read happens.
+          Object.defineProperty(this, "status", {
+            get: function () { return 200; },
+            configurable: true
+          });
         } catch (__psychStatusErr) {
           if (window.__psychReportError) window.__psychReportError(__psychStatusErr);
         }
@@ -432,6 +444,19 @@ window.__psychAssetStats = { opened: 0, loaded: 0, failed: 0 };
         this.addEventListener("load", function () {
           window.__psychAssetStats.loaded++;
           if (window.__psychRenderAssetStats) window.__psychRenderAssetStats();
+        });
+        // Diagnostic: directly mirror the exact check Lime's own
+        // compiled HTML5HTTPRequest.__loadText/__loadBinary performs
+        // (readyState === 4, then reads .status) to see definitively
+        // whether the status override is actually visible at the same
+        // point Lime's own code reads it, or whether something resets
+        // it / a different object identity is involved in practice
+        // (despite the override being verified sound in isolation).
+        this.addEventListener("readystatechange", function () {
+          if (self.readyState === 4) {
+            window.__psychAssetStats.lastReadyState4Status = self.status;
+            if (window.__psychRenderAssetStats) window.__psychRenderAssetStats();
+          }
         });
         // Diagnostic: capture what a real "progress" event reports for a
         // blob: URL load — this is very likely what Lime's own
