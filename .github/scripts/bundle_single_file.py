@@ -248,7 +248,8 @@ window.__psychAssetStats = { opened: 0, loaded: 0, failed: 0 };
       document.body.appendChild(statsEl);
     }
     var s = window.__psychAssetStats;
-    statsEl.textContent = "assets: opened=" + s.opened + " loaded=" + s.loaded + " failed=" + s.failed;
+    statsEl.textContent = "assets: opened=" + s.opened + " loaded=" + s.loaded + " failed=" + s.failed +
+      (s.lastProgress ? " | progress: " + s.lastProgress : "");
   }
   window.__psychRenderAssetStats = renderStats;
 })();
@@ -399,6 +400,22 @@ window.__psychAssetStats = { opened: 0, loaded: 0, failed: 0 };
         });
         this.addEventListener("load", function () {
           window.__psychAssetStats.loaded++;
+          if (window.__psychRenderAssetStats) window.__psychRenderAssetStats();
+        });
+        // Diagnostic: capture what a real "progress" event reports for a
+        // blob: URL load — this is very likely what Lime's own
+        // HTTPRequest/Preloader classes read to compute bytesLoaded/
+        // bytesTotal and drive the visible percentage. If
+        // lengthComputable is false or total is 0 here, that's almost
+        // certainly why the preloader stays frozen at 0% even though
+        // every individual asset genuinely loads successfully (confirmed
+        // separately via opened/loaded/failed counts above).
+        var progressLogged = false;
+        this.addEventListener("progress", function (ev) {
+          if (progressLogged) return;
+          progressLogged = true;
+          window.__psychAssetStats.lastProgress =
+            "lengthComputable=" + ev.lengthComputable + " loaded=" + ev.loaded + " total=" + ev.total;
           if (window.__psychRenderAssetStats) window.__psychRenderAssetStats();
         });
         // Diagnostic: a failed blob: URL load fires a native "error"
