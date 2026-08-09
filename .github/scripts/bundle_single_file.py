@@ -143,7 +143,17 @@ ERROR_OVERLAY_JS = r"""
       "padding:16px;overflow:auto;box-sizing:border-box;";
 
     var totalOccurrences = 0;
-    for (var key in errorCounts) if (errorCounts.hasOwnProperty(key)) totalOccurrences += errorCounts[key];
+    // errorCounts is deliberately Object.create(null) (no prototype),
+    // so it can safely use arbitrary error-message strings as keys
+    // without any risk of colliding with real Object.prototype members
+    // (constructor, toString, etc. — a real error message could
+    // theoretically be the literal string "constructor"). But that same
+    // choice means .hasOwnProperty doesn't exist ON the object either —
+    // it's normally inherited from Object.prototype, which this object
+    // has none of. Confirmed via a real crash report: "TypeError:
+    // errorCounts.hasOwnProperty is not a function". Call it explicitly
+    // via Object.prototype instead of assuming it's present as a method.
+    for (var key in errorCounts) if (Object.prototype.hasOwnProperty.call(errorCounts, key)) totalOccurrences += errorCounts[key];
 
     var title = document.createElement("div");
     title.textContent = "Build failed to start — " + errors.length + " distinct error(s), " +
