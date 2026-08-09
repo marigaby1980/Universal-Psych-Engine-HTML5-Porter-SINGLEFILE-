@@ -248,20 +248,38 @@ window.__psychAssetStats = { opened: 0, loaded: 0, failed: 0 };
       document.body.appendChild(statsEl);
     }
     var s = window.__psychAssetStats;
+    var canvasEl = document.querySelector("canvas");
+    var canvasInfo = canvasEl
+      ? ("canvas " + canvasEl.width + "x" + canvasEl.height +
+         " style=" + canvasEl.style.width + "x" + canvasEl.style.height)
+      : "no <canvas> found";
     statsEl.textContent = "assets: opened=" + s.opened + " loaded=" + s.loaded + " failed=" + s.failed +
       (s.lastProgress ? " | progress: " + s.lastProgress : "") +
       (s.lastReadyState4Status !== undefined ? " | status@rs4: " + s.lastReadyState4Status : "") +
-      " | visibility: " + document.visibilityState +
-      (window.__psychVisibilityDiag ? " (initial: " + window.__psychVisibilityDiag + ")" : "") +
-      (window.__psychVisibilityDiagAfter ? " (after 500ms: " + window.__psychVisibilityDiagAfter + ")" : "") +
-      " | hasFocus: " + document.hasFocus();
+      " | " + canvasInfo +
+      " | RAF ticks: " + (window.__psychRafTicks || 0);
   }
   window.__psychRenderAssetStats = renderStats;
-  // Also poll periodically, not just on asset events, so the visibility
-  // fields update live even if no new asset request happens to trigger a
-  // re-render — the __psychVisibilityDiagAfter value in particular is set
-  // asynchronously 500ms after boot, independent of asset activity.
+  // Also poll periodically, not just on asset events, so the readout
+  // (canvas dimensions, RAF tick count) updates live even with no new
+  // asset activity — relevant now that loading itself is confirmed
+  // working and the open question has shifted to whether anything
+  // renders afterward.
   setInterval(renderStats, 500);
+
+  // Lightweight requestAnimationFrame counter, entirely independent of
+  // the compiled engine's own render loop — this tells us directly
+  // whether the BROWSER's render loop is running at all for this page
+  // (a black screen with RAF ticks climbing means rendering logic is
+  // running but drawing nothing/off-canvas/wrong-size; RAF ticks stuck
+  // at 0 means the render loop itself never starts, a much more
+  // fundamental block).
+  window.__psychRafTicks = 0;
+  function rafTick() {
+    window.__psychRafTicks++;
+    requestAnimationFrame(rafTick);
+  }
+  requestAnimationFrame(rafTick);
 })();
 
 //
