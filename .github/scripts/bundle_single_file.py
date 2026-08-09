@@ -250,9 +250,18 @@ window.__psychAssetStats = { opened: 0, loaded: 0, failed: 0 };
     var s = window.__psychAssetStats;
     statsEl.textContent = "assets: opened=" + s.opened + " loaded=" + s.loaded + " failed=" + s.failed +
       (s.lastProgress ? " | progress: " + s.lastProgress : "") +
-      (s.lastReadyState4Status !== undefined ? " | status@rs4: " + s.lastReadyState4Status : "");
+      (s.lastReadyState4Status !== undefined ? " | status@rs4: " + s.lastReadyState4Status : "") +
+      " | visibility: " + document.visibilityState +
+      (window.__psychVisibilityDiag ? " (initial: " + window.__psychVisibilityDiag + ")" : "") +
+      (window.__psychVisibilityDiagAfter ? " (after 500ms: " + window.__psychVisibilityDiagAfter + ")" : "") +
+      " | hasFocus: " + document.hasFocus();
   }
   window.__psychRenderAssetStats = renderStats;
+  // Also poll periodically, not just on asset events, so the visibility
+  // fields update live even if no new asset request happens to trigger a
+  // re-render — the __psychVisibilityDiagAfter value in particular is set
+  // asynchronously 500ms after boot, independent of asset activity.
+  setInterval(renderStats, 500);
 })();
 
 //
