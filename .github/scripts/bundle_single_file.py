@@ -264,6 +264,7 @@ window.__psychAssetStats = { opened: 0, loaded: 0, failed: 0 };
          " style=" + canvasEl.style.width + "x" + canvasEl.style.height)
       : "no <canvas> found";
     statsEl.textContent = "assets: opened=" + s.opened + " loaded=" + s.loaded + " failed=" + s.failed +
+      (s.unresolvedFallback ? " | unresolved(fallback)=" + s.unresolvedFallback : "") +
       (s.lastProgress ? " | progress: " + s.lastProgress : "") +
       (s.lastReadyState4Status !== undefined ? " | status@rs4: " + s.lastReadyState4Status : "") +
       " | " + canvasInfo +
@@ -462,6 +463,44 @@ window.__psychAssetStats = { opened: 0, loaded: 0, failed: 0 };
         window.__psychAssetStats.opened++;
         if (window.__psychRenderAssetStats) window.__psychRenderAssetStats();
         return origOpen.call(this, method, blobUrl, true);
+      }
+      // FALLBACK FOR UNRESOLVED ASSET-LOOKING PATHS: Lime's own
+      // AssetLibrary.load_onError calls this.promise.error(...) on ANY
+      // single asset failure (confirmed directly from the compiled
+      // engine: `this.promise.error("Error loading asset ...")`, with no
+      // per-asset isolation) — meaning if even one asset request ever
+      // falls through to a real native open() in this context (no real
+      // server backing the page), that one failure can halt the ENTIRE
+      // preloader for the whole game, not just that one asset. Rather
+      // than leave that as a landmine for any asset path our resolve()
+      // logic doesn't happen to match (a typo, an unusual path shape, a
+      // mod-specific asset our matching heuristics miss), requests that
+      // structurally look like an asset path (the same folder-name
+      // signature resolve() itself checks for) but weren't found in the
+      // manifest get a harmless placeholder blob instead of a real
+      // request that's guaranteed to fail here. Anything that doesn't
+      // look like an asset path at all still falls through to the
+      // original native behavior, in case something genuinely needs it.
+      if (/(?:^|[\/:])(?:assets|flixel|mods)\//.test(String(url))) {
+        var placeholderBlob = new Blob([""], { type: "text/plain" });
+        var placeholderUrl = URL.createObjectURL(placeholderBlob);
+        this.__isEmbedded = true;
+        this.__embeddedBlobUrl = placeholderUrl;
+        try {
+          Object.defineProperty(this, "status", {
+            get: function () { return 200; },
+            configurable: true
+          });
+        } catch (__psychStatusErr2) {}
+        window.__psychAssetStats.opened++;
+        window.__psychAssetStats.unresolvedFallback = (window.__psychAssetStats.unresolvedFallback || 0) + 1;
+        if (window.__psychRenderAssetStats) window.__psychRenderAssetStats();
+        if (window.__psychReportError) {
+          window.__psychReportError(new Error(
+            "Asset path not found in embedded manifest, served empty placeholder instead: " + url
+          ));
+        }
+        return origOpen.call(this, method, placeholderUrl, true);
       }
       return origOpen.apply(this, arguments);
     };
