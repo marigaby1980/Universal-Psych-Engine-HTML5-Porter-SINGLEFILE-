@@ -108,42 +108,39 @@ jobs:
         run: |
           set -e
           cd engine-source
-          mkdir -p mods
 
-          # Psych Engine's own convention (confirmed via the engine's
-          # example_mods README): ALL mod content — new content AND
-          # replacements for base-game assets — goes under mods/, never
-          # directly into assets/. The engine merges mods/ over assets/
-          # itself at runtime. Copying into assets/ was not just
-          # unnecessary but actively harmful: assets/ already exists with
-          # real subfolders from the engine checkout (assets/shared,
-          # assets/base_game, etc.), so a no-clobber copy there would
-          # silently skip almost every file the mod provides, since most
-          # destination paths already existed. That's what caused two
-          # different mods to produce suspiciously similar/identical
-          # output sizes — most of each mod's unique content was quietly
-          # never being copied in at all.
+          # CRITICAL: Psych Engine's mods/ convention only works when
+          # MODS_ALLOWED is compiled in, and Project.xml declares
+          # `<define name="MODS_ALLOWED" if="desktop" />` — desktop only.
+          # Every mods/-reading code path (backend/Mods.hx,
+          # backend/Paths.hx's getPath()/modFolders()) is dead code on
+          # HTML5, compiled out entirely. A mod placed in mods/ was
+          # completely inert on web: never read, never merged into the
+          # build, never shown — confirmed directly from the real
+          # Paths.hx source, whose getPath() falls straight through to
+          # getSharedPath() -> 'assets/shared/$file' on web, with no
+          # mods/ check at all.
           #
-          # Uses rsync -a instead of `cp -rn`: a real recursive merge that
-          # overwrites files at the destination when the mod provides its
-          # own version of something, while leaving any engine file the
-          # mod doesn't touch alone. `cp -n` (no-clobber) would repeat the
-          # exact same silent-skip bug inside mods/ once it's no longer
-          # empty on a second run, or for any mod file path that happens
-          # to already exist there for any other reason.
-          if command -v rsync >/dev/null 2>&1; then
-            rsync -a ../mods_upload/ mods/
-          else
-            echo "rsync not found, installing..."
-            sudo apt-get update -qq && sudo apt-get install -y -qq rsync
-            rsync -a ../mods_upload/ mods/
+          # Instead, inject_mod_for_html5.py copies the mod's content
+          # directly into the real assets/ subfolders the compiled web
+          # build actually reads (mirroring Paths.hx's own resolution:
+          # characters/images/stages -> assets/shared/images/, sounds ->
+          # assets/shared/sounds/, songs/<name>/ -> assets/songs/<name>/,
+          # etc.), and converts .ogg audio to .mp3 in the same pass —
+          # Paths.hx declares `SOUND_EXT = #if web "mp3" #else "ogg"
+          # #end`, and Project.xml explicitly excludes *.ogg on web, so a
+          # mod shipping only .ogg (the normal FNF/Psych source format)
+          # would have its audio silently excluded regardless of correct
+          # folder placement.
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            echo "ffmpeg not found, installing..."
+            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
           fi
+          python3 "${GITHUB_WORKSPACE}/repo/.github/scripts/inject_mod_for_html5.py" \
+            ../mods_upload .
 
-          echo "Injected. File counts:"
-          echo "  mods_upload (source): $(find ../mods_upload -type f | wc -l) files"
-          echo "  mods/ (destination, after merge): $(find mods -type f | wc -l) files"
-          echo "mods/ top level now:"
-          ls mods/ | head -30
+          echo ""
+          echo "Final assets/ file count: $(find assets -type f | wc -l)"
 
       # ------------------------------------------------------------------
       # 3. Toolchain
