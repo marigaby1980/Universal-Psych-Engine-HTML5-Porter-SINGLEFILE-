@@ -70,6 +70,27 @@ import subprocess
 import sys
 
 
+# Folders that Psych Engine's own docs confirm are LAZY-LOADED at
+# runtime through specific game events (e.g. an Event Script "will only
+# run if the said Event is being used on the chart" — Psych's own Lua
+# Script API docs), read directly via the mods/ mechanism at the moment
+# they're needed, NOT meant to be part of the upfront bulk asset
+# manifest. Since mods/ itself is inert on web (MODS_ALLOWED is
+# desktop-only), there is no working on-demand-load path for these on a
+# web build at all. Copying them into assets/shared/ anyway (an earlier
+# version of this script did) caused a real, confirmed failure: Project.
+# xml's blanket `<assets path="assets/shared" .../>` tag picks up
+# EVERYTHING under that folder and bakes it into the preloader's
+# mandatory bulk-load list — turning files that were only ever meant to
+# be fetched conditionally into hard, load-blocking dependencies. Since
+# even one failed asset is fatal to the whole preloader (confirmed
+# directly from Lime's compiled AssetLibrary.load_onError, which calls
+# promise.error() with no per-asset isolation), and there's no working
+# mechanism to actually load these on-demand on web regardless, they are
+# excluded from the copy entirely — a working build without these
+# systems is a better outcome than a build that can't start at all.
+EXCLUDED_FOLDERS = {"custom_events", "custom_notetypes", "scripts"}
+
 # Mod top-level folder name -> destination path template. {file} is the
 # path of the item relative to that top-level folder.
 FOLDER_MAP = {
@@ -82,9 +103,6 @@ FOLDER_MAP = {
     "data": "assets/shared/data",
     "weeks": "assets/shared/weeks",
     "videos": "assets/videos",
-    "custom_events": "assets/shared/custom_events",
-    "custom_notetypes": "assets/shared/custom_notetypes",
-    "scripts": "assets/shared/scripts",
     # songs/ is handled specially below (preserves the per-song
     # subfolder exactly, since Paths.hx resolves song assets as
     # assets/songs/<songname>/... via getFolderPath/currentLevel).
@@ -120,12 +138,37 @@ def convert_audio_if_needed(src_path, dest_path):
         return dest_path
 
 
+# Common placeholder/scaffolding files that mod folder templates ship
+# with empty folders (so they survive being zipped/committed, since git
+# and most zip tools don't preserve genuinely empty directories) — e.g.
+# Psych Engine's own mod template. These aren't real assets and were
+# confirmed, via a real build's error log, to break the preloader when
+# copied in as if they were: Project.xml's blanket <assets> tags pick up
+# every file under a folder indiscriminately, including these, and the
+# compiled build then tries to load them as real assets and fails.
+PLACEHOLDER_PATTERNS = [
+    re.compile(r".*-go-here\.txt$", re.IGNORECASE),
+    re.compile(r"^\.gitkeep$", re.IGNORECASE),
+    re.compile(r"^\.gitignore$", re.IGNORECASE),
+    re.compile(r"^placeholder\.", re.IGNORECASE),
+    re.compile(r"^readme\.(txt|md)$", re.IGNORECASE),
+]
+
+
+def is_placeholder_file(fname):
+    return any(pattern.match(fname) for pattern in PLACEHOLDER_PATTERNS)
+
+
 def copy_tree_with_conversion(src_dir, dest_dir):
     converted = 0
     copied = 0
+    skipped_placeholders = 0
     for root, _dirs, files in os.walk(src_dir):
         rel_root = os.path.relpath(root, src_dir)
         for fname in files:
+            if is_placeholder_file(fname):
+                skipped_placeholders += 1
+                continue
             src_path = os.path.join(root, fname)
             dest_path = os.path.join(dest_dir, rel_root, fname) if rel_root != "." else os.path.join(dest_dir, fname)
             final_path = convert_audio_if_needed(src_path, dest_path)
@@ -133,6 +176,8 @@ def copy_tree_with_conversion(src_dir, dest_dir):
                 converted += 1
             else:
                 copied += 1
+    if skipped_placeholders:
+        print(f"    (skipped {skipped_placeholders} placeholder/scaffolding file(s))")
     return copied, converted
 
 
@@ -159,6 +204,12 @@ def main():
             continue
 
         key = entry.lower()
+
+        if key in EXCLUDED_FOLDERS:
+            print(f"  {entry}/ -> SKIPPED (lazy-loaded via mods/ at runtime on desktop; "
+                  f"no working on-demand-load path on web, and including it would poison "
+                  f"the preloader's mandatory bulk-load list — see EXCLUDED_FOLDERS comment)")
+            continue
 
         if key == "songs":
             # Preserve per-song subfolder structure exactly:
